@@ -3212,6 +3212,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-rs-gdb"
+version = "0.32.0"
+dependencies = [
+ "anyhow",
+ "gdbstub",
+ "itertools 0.15.0",
+ "parking_lot",
+ "probe-rs",
+ "tracing",
+]
+
+[[package]]
 name = "probe-rs-linux"
 version = "0.32.0"
 dependencies = [

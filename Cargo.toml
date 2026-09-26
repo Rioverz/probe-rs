@@ -26,6 +26,7 @@ members = [
     "probe-rs-debug",
     "probe-rs-espressif",
     "probe-rs-linux",
+    "probe-rs-gdb",
 ]
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
