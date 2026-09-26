@@ -5,6 +5,9 @@ use std::ops::Range;
 /// Describes any error that happened during the or in preparation for the flashing procedure.
 #[derive(thiserror::Error, Debug)]
 pub enum FlashError {
+    /// The caller requested preservation of a prepared target but did not halt it.
+    #[error("The prepared target clock requires an already halted core.")]
+    PreparedTargetNotHalted,
     /// No flash algorithm was found by the given name.
     #[error("The {name} target has no flash algorithm called {name}")]
     AlgorithmNotFound {
