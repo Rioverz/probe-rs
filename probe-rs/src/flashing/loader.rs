@@ -1237,7 +1237,7 @@ impl FlashLoader {
         session: &mut Session,
         progress: &mut FlashProgress<'_>,
     ) -> Result<(), FlashError> {
-        let mut plan = self.prepare_plan(session, false, &[], false)?;
+        let mut plan = self.prepare_plan(session, false, &[], false, false)?;
 
         for method in plan.iter_mut() {
             method.add_verify_progress_bar(progress);
@@ -1271,6 +1271,7 @@ impl FlashLoader {
             options.keep_unwritten_bytes,
             &options.preferred_algos,
             options.do_chip_erase,
+            options.preserve_prepared_target_clock,
         )?;
 
         if options.dry_run {
@@ -1471,6 +1472,7 @@ impl FlashLoader {
         restore_unwritten_bytes: bool,
         opt_preferred_algos: &[String],
         chip_erase: bool,
+        preserve_prepared_target_clock: bool,
     ) -> Result<Vec<Box<dyn DownloadMethod + '_>>, FlashError> {
         tracing::debug!("Contents of builder:");
         for (&address, data) in &self.builder.data {
@@ -1579,6 +1581,7 @@ impl FlashLoader {
                 } else {
                     let mut f = Flasher::new(target, core, algo)?;
                     f.read_rtt_output(self.read_flasher_rtt);
+                    f.preserve_prepared_target_clock = preserve_prepared_target_clock;
                     Box::new(f)
                 };
                 flasher.add_region(region, &self.builder, restore_unwritten_bytes)?;
