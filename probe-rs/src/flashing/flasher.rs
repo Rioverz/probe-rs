@@ -145,6 +145,7 @@ pub struct Flasher {
     pub(super) loaded: bool,
     pub(super) regions: Vec<LoadedRegion>,
     pub(super) read_flasher_rtt: bool,
+    pub(super) preserve_prepared_target_clock: bool,
 }
 
 /// The byte used to fill the stack when checking for stack overflows.
@@ -169,6 +170,7 @@ impl Flasher {
             loaded: false,
             regions: Vec::new(),
             read_flasher_rtt: false,
+            preserve_prepared_target_clock: false,
         })
     }
 
@@ -198,8 +200,12 @@ impl Flasher {
 
         // TODO: we probably want a full system reset here to make sure peripherals don't interfere.
         tracing::debug!("Reset and halt core {}", self.core_index);
-        core.reset_and_halt(Duration::from_millis(500))
-            .map_err(FlashError::ResetAndHalt)?;
+        if !self.preserve_prepared_target_clock {
+            core.reset_and_halt(Duration::from_millis(500))
+                .map_err(FlashError::ResetAndHalt)?;
+        } else if !core.core_halted().map_err(FlashError::Core)? {
+            return Err(FlashError::PreparedTargetNotHalted);
+        }
 
         // TODO: Possible special preparation of the target such as enabling faster clocks for the flash e.g.
 
@@ -1479,5 +1485,27 @@ impl ActiveFlasher<'_, '_, Program> {
                 page_address: last_page_address,
                 source: Box::new(error),
             })
+    }
+}
+
+#[cfg(test)]
+mod opi_clock_preserve_tests {
+    use crate::flashing::{DownloadOptions, FlashError};
+
+    // OPI-CLOCK-PRESERVE must default to off so stock flashing behavior
+    // (reset-and-halt during setup) is unchanged unless a qualified caller opts in.
+    #[test]
+    fn preserve_prepared_target_clock_defaults_off() {
+        assert!(!DownloadOptions::default().preserve_prepared_target_clock);
+    }
+
+    // The opt-in path fails closed with a distinct, actionable error when the
+    // caller has not already halted the core before flashing.
+    #[test]
+    fn prepared_target_not_halted_has_actionable_message() {
+        assert_eq!(
+            FlashError::PreparedTargetNotHalted.to_string(),
+            "The prepared target clock requires an already halted core."
+        );
     }
 }

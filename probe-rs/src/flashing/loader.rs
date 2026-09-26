@@ -675,6 +675,9 @@ impl FlashLoader {
             options.keep_unwritten_bytes,
             &options.preferred_algos,
         )?;
+        for flasher in &mut algos {
+            flasher.preserve_prepared_target_clock = options.preserve_prepared_target_clock;
+        }
 
         if options.dry_run {
             tracing::info!("Skipping programming, dry run!");
