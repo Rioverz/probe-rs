@@ -1508,4 +1508,123 @@ mod opi_clock_preserve_tests {
             "The prepared target clock requires an already halted core."
         );
     }
+
+    // The mocked core counts resets and status reads so these tests assert the
+    // branch's effect on the core, not only its returned error.
+    #[cfg(feature = "builtin-targets")]
+    mod seam {
+        use super::super::Flasher;
+        use crate::flashing::FlashError;
+        use crate::probe::Probe;
+        use crate::probe::fake_probe::{FakeProbe, MockCoreHandles};
+        use crate::{Permissions, Session};
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        const CHIP: &str = "nrf51822_xxAC";
+
+        fn attach(probe: FakeProbe) -> Session {
+            Probe::from_specific_probe(Box::new(probe))
+                .attach(CHIP, Permissions::default())
+                .expect("attach fake probe")
+        }
+
+        fn mock_flasher(session: &Session) -> Flasher {
+            let target = session.target().clone();
+            let algo = target.flash_algorithms[0].clone();
+            Flasher::new(&target, 0, &algo).expect("build flasher")
+        }
+
+        // Number of resets the core received during `load`, measured from a zeroed
+        // baseline so attach-time resets do not count.
+        fn resets_during_load(
+            flasher: &mut Flasher,
+            session: &mut Session,
+            handles: &MockCoreHandles,
+        ) -> usize {
+            handles.reset_requests.store(0, Ordering::Relaxed);
+            let _ = flasher.load(session);
+            handles.reset_requests.load(Ordering::Relaxed)
+        }
+
+        #[test]
+        fn preserve_off_calls_reset_and_halt() {
+            let (probe, handles) = FakeProbe::with_mocked_core_observable();
+            let mut session = attach(probe);
+            let _ = session.core(0).unwrap().run();
+            let mut flasher = mock_flasher(&session);
+            assert!(!flasher.preserve_prepared_target_clock);
+            let resets = resets_during_load(&mut flasher, &mut session, &handles);
+            assert!(
+                resets >= 1,
+                "preserve=off must invoke reset_and_halt, but no reset was requested"
+            );
+        }
+
+        #[test]
+        fn preserve_on_running_core_fails_closed() {
+            let mut session = attach(FakeProbe::with_mocked_core());
+            let _ = session.core(0).unwrap().run();
+            assert!(!session.core(0).unwrap().core_halted().unwrap());
+            let mut flasher = mock_flasher(&session);
+            flasher.preserve_prepared_target_clock = true;
+            let err = flasher
+                .load(&mut session)
+                .expect_err("a running core must be rejected under preserve=on");
+            assert!(
+                matches!(err, FlashError::PreparedTargetNotHalted),
+                "preserve=on with a running core must fail closed with PreparedTargetNotHalted; got {err:?}"
+            );
+        }
+
+        #[test]
+        fn preserve_on_halted_core_skips_reset() {
+            let (probe, handles) = FakeProbe::with_mocked_core_observable();
+            let mut session = attach(probe);
+            session
+                .core(0)
+                .unwrap()
+                .halt(Duration::from_millis(100))
+                .expect("halt mocked core");
+            assert!(session.core(0).unwrap().core_halted().unwrap());
+            let mut flasher = mock_flasher(&session);
+            flasher.preserve_prepared_target_clock = true;
+
+            handles.reset_requests.store(0, Ordering::Relaxed);
+            handles.status_reads.store(0, Ordering::Relaxed);
+            let _ = flasher.load(&mut session);
+            let resets = handles.reset_requests.load(Ordering::Relaxed);
+            let status_reads = handles.status_reads.load(Ordering::Relaxed);
+
+            // An already-halted core must pass the halt check (a status read) and skip
+            // reset, not bail out before the check.
+            assert!(
+                status_reads >= 1,
+                "preserve=on must evaluate the halt check (a core-status read); none occurred"
+            );
+            assert_eq!(
+                resets, 0,
+                "preserve=on with an already-halted core must NOT invoke reset_and_halt"
+            );
+        }
+
+        // A failed core-status read on the preserve path must surface as
+        // FlashError::Core, not be swallowed or mis-mapped.
+        #[test]
+        fn failed_core_status_read_maps_to_flash_error_core() {
+            let (probe, handles) = FakeProbe::with_mocked_core_observable();
+            let mut session = attach(probe);
+            let mut flasher = mock_flasher(&session);
+            flasher.preserve_prepared_target_clock = true;
+            // Arm only now: the attach sequence's own status reads have completed.
+            handles.fail_status_read.store(true, Ordering::Relaxed);
+            let err = flasher
+                .load(&mut session)
+                .expect_err("a failing core-status read must surface as an error");
+            assert!(
+                matches!(err, FlashError::Core(_)),
+                "a failed core-status read on the preserve path must map to FlashError::Core; got {err:?}"
+            );
+        }
+    }
 }

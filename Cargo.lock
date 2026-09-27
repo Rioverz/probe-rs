@@ -3217,9 +3217,11 @@ version = "0.32.0"
 dependencies = [
  "anyhow",
  "gdbstub",
+ "hex",
  "itertools 0.15.0",
  "parking_lot",
  "probe-rs",
+ "sha2 0.10.9",
  "tracing",
 ]
 

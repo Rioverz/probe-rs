@@ -20,6 +20,8 @@ use object::{
     elf::PT_LOAD,
     read::elf::{ElfFile, FileHeader, ProgramHeader},
 };
+#[cfg(any(test, feature = "test"))]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::{
     cell::RefCell,
     collections::{BTreeSet, VecDeque},
@@ -92,9 +94,33 @@ struct MockCore {
     /// Is the core halted?
     is_halted: bool,
 
+    /// When armed, the next core-status (DHCSR) read fails once, then re-arms off.
+    #[cfg(any(test, feature = "test"))]
+    fail_status_read: Arc<AtomicBool>,
+
+    /// Counts core-status (DHCSR) reads.
+    #[cfg(any(test, feature = "test"))]
+    status_reads: Arc<AtomicUsize>,
+
+    /// Counts system-reset requests (AIRCR SYSRESETREQ/VECTRESET) received.
+    #[cfg(any(test, feature = "test"))]
+    reset_requests: Arc<AtomicUsize>,
+
     program_binary: Option<Vec<u8>>,
     loadable_segments: Vec<LoadableSegment>,
     endianness: Endianness,
+}
+
+/// Observability handles for a mocked core; see
+/// [`FakeProbe::with_mocked_core_observable`].
+#[cfg(any(test, feature = "test"))]
+pub struct MockCoreHandles {
+    /// Set to `true` to make the mocked core's next status (DHCSR) read fail once.
+    pub fail_status_read: Arc<AtomicBool>,
+    /// Number of core-status (DHCSR) reads the mocked core has served.
+    pub status_reads: Arc<AtomicUsize>,
+    /// Number of system-reset requests the mocked core has received.
+    pub reset_requests: Arc<AtomicUsize>,
 }
 
 impl MockCore {
@@ -102,6 +128,12 @@ impl MockCore {
         Self {
             dhcsr: Dhcsr(0),
             is_halted: false,
+            #[cfg(any(test, feature = "test"))]
+            fail_status_read: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "test"))]
+            status_reads: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test"))]
+            reset_requests: Arc::new(AtomicUsize::new(0)),
             program_binary: None,
             loadable_segments: Vec::new(),
             endianness: Endianness::Little,
@@ -168,6 +200,14 @@ impl MemoryInterface<ArmError> for &mut MockCore {
             match address {
                 // DHCSR
                 Dhcsr::ADDRESS_OFFSET => {
+                    #[cfg(any(test, feature = "test"))]
+                    self.status_reads.fetch_add(1, Ordering::Relaxed);
+                    // One-shot forced failure of the core-status read.
+                    #[cfg(any(test, feature = "test"))]
+                    if self.fail_status_read.swap(false, Ordering::Relaxed) {
+                        return Err(ArmError::Timeout);
+                    }
+
                     let mut dhcsr: u32 = self.dhcsr.into();
 
                     if self.is_halted {
@@ -257,6 +297,18 @@ impl MemoryInterface<ArmError> for &mut MockCore {
                         }
                     }
                 }
+                // AIRCR (Application Interrupt and Reset Control Register): count
+                // valid system-reset requests so a test can tell whether the flash
+                // path invoked reset_and_halt.
+                #[cfg(any(test, feature = "test"))]
+                0xE000_ED0C => {
+                    let vectkey_ok = (*word >> 16) == 0x05FA;
+                    let requests_reset = *word & (1 << 2) != 0 || *word & 1 != 0;
+                    if vectkey_ok && requests_reset {
+                        self.reset_requests.fetch_add(1, Ordering::Relaxed);
+                    }
+                    println!("Write AIRCR = {word:#010x}");
+                }
                 _ => println!("Write {address:#010x} = {word:#010x}"),
             }
         }
@@ -341,6 +393,26 @@ impl FakeProbe {
             memory_ap: MockedAp::Core(MockCore::new()),
             ..Self::default()
         }
+    }
+
+    /// A fake probe with a mocked core plus shared observability handles
+    /// ([`MockCoreHandles`]). Arm `fail_status_read` *after* attaching so the
+    /// attach sequence's own status reads succeed.
+    #[cfg(any(test, feature = "test"))]
+    pub fn with_mocked_core_observable() -> (Self, MockCoreHandles) {
+        let core = MockCore::new();
+        let handles = MockCoreHandles {
+            fail_status_read: core.fail_status_read.clone(),
+            status_reads: core.status_reads.clone(),
+            reset_requests: core.reset_requests.clone(),
+        };
+        (
+            FakeProbe {
+                memory_ap: MockedAp::Core(core),
+                ..Self::default()
+            },
+            handles,
+        )
     }
 
     /// Fake probe with a mocked core

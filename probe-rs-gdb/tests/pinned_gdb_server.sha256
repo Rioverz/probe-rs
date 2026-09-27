@@ -1,0 +1,19 @@
+# SHA-256 of the pinned probe-rs GDB server .rs source at
+# 48f5e4d53c690a1d40c2454033c6f785b4f4f95c (probe-rs v0.32.0), over LF-normalized
+# bytes. Format: "<sha256>  <relpath>", paths relative to
+# probe-rs-tools/src/bin/probe-rs/cmd/gdb_server/. Non-Rust files are out of scope.
+9f29cddf4d641f5e26726a110b86553213ccafead8bd410878fa5bc3c073fc34  arch.rs
+817c5afc64f8597c319ba7f6b13f162c50e0b258c52416b6e3a6ffb65e13320f  mod.rs
+937ad5d2ab1ee9128c73c5eb8d2b509a654624d33956f84096afe8fe742b5e6e  stub.rs
+4e9c11df6df4a0e70fb813ce62f7641a1b84c2f39363970a9f7064e1da5a2994  target/base.rs
+4444fbf75446ce81e64f869a419174586a3eceef47ae3e2a4e660c464df0b022  target/breakpoints.rs
+04e16228988fb9c61fe3522973d0fb852e5a892da3f6f68359387c0b251121eb  target/desc/data.rs
+8f2897aa3dd8b1c41411535f8171a2ef5505edf47ec9c1689a12871e163ecc20  target/desc/mod.rs
+173fe5f8265cada9fe5386a7cf78d1f30e88f654a98058f8cbf6fe97c8d63a8b  target/desc/test.rs
+d5f36391921a774680be69dc52d18d975407bdb012306acf24829719eb195b8f  target/flash.rs
+32d64a7c2e67d94493552126f089891023922b289156ad386ae0c72b4b617df1  target/mod.rs
+1ef143c89b335b7ea4cdd754ecfda8d82cc7fcbc1668167617abfadd20371376  target/monitor.rs
+9d4576f8ed6ca061295f370ec5f6686f52219b603598cb88deb75237c2077f09  target/resume.rs
+4a9aeb6feb1d42824ebb121322280ac6ccab9cfec0e52493cd1c6e93cb9489be  target/thread.rs
+be78606710244280184058e8e0a7fe8ca70e4d6615f3a0ef615cb8935f6bfcef  target/traits.rs
+2e650c5905e17d18989dce1bfd8fd86cd99d17b65cc7364089bc8dfad5c003f1  target/utils.rs
