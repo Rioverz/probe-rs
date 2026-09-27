@@ -111,6 +111,10 @@ object = { version = "0.40", default-features = false, features = [
 name = "flash_dry_run"
 required-features = ["test"]
 
+[[test]]
+name = "clock_preserve_propagation"
+required-features = ["test"]
+
 [[package.metadata.release.pre-release-replacements]]
 file = "../CHANGELOG.md"
 search = "## \\[Unreleased\\]"

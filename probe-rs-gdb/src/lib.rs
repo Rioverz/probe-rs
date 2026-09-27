@@ -6,7 +6,7 @@
 //! `probe_rs::Session` behind a `FairMutex`; it must serve GDB by *borrowing*
 //! that session, never by opening the probe a second time.
 //!
-//! This crate is the library-exposure patch: it re-exports the byte-verbatim
+//! This crate is the library-exposure patch: it re-exports the extracted
 //! GDB stub entry points ([`gdb::run`], [`gdb::GdbInstanceConfiguration`]) as a
 //! public library API. `run` takes a borrowed `&FairMutex<Session>` and
 //! `GdbInstanceConfiguration::from_session` takes a borrowed `&Session`, so the

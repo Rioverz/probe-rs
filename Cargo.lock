@@ -700,7 +700,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -963,7 +963,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8d162beedaa69905488a8da94f5ac3edb4dd4788b732fadb7bd120b2625c1976"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1253,7 +1253,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1306,7 +1306,7 @@ dependencies = [
  "nix 0.31.3",
  "object 0.40.0",
  "serde",
- "sha2",
+ "sha2 0.11.1",
  "strum 0.28.0",
  "thiserror 2.0.21",
 ]
@@ -2452,7 +2452,7 @@ version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
 dependencies = [
- "sha2",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -3143,9 +3143,11 @@ version = "0.32.0"
 dependencies = [
  "anyhow",
  "gdbstub",
+ "hex",
  "itertools 0.15.0",
  "parking_lot 0.12.5",
  "probe-rs",
+ "sha2 0.10.9",
  "tracing",
 ]
 
@@ -3201,7 +3203,7 @@ dependencies = [
  "probe-rs-rpc",
  "rustls",
  "serde",
- "sha2",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite 0.30.0",
@@ -3284,7 +3286,7 @@ dependencies = [
  "scroll",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.1",
  "svd-parser",
  "svg",
  "tempfile",
@@ -3752,7 +3754,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3810,7 +3812,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4138,6 +4140,17 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
  "digest 0.11.2",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -4509,7 +4522,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5428,7 +5441,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

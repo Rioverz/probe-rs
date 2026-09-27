@@ -196,8 +196,3 @@ fn gdb_memory_map(session: &mut Session, primary_core_id: usize) -> Result<Strin
 
     Ok(xml_map)
 }
-
-// Upstream's `#[cfg(test)] mod test;` is intentionally absent here: those
-// snapshot tests exercise target-description rendering, not the borrow seam this
-// tree proves, and keeping them would pull an `insta` dev-dependency into the
-// library crate. See ../../../EXTRACTION.md for the recorded delta.
