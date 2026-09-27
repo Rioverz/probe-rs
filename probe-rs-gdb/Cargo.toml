@@ -1,26 +1,38 @@
 [package]
 name = "probe-rs-gdb"
-version = "0.32.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-description = "OPI-GDB-LIB: the probe-rs GDB server exposed as a library that serves RSP against a worker-owned, borrowed Session. Engine files are byte-verbatim from probe-rs-tools at the pinned commit; see EXTRACTION.md."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+homepage.workspace = true
+description = "OPI-GDB-LIB: the probe-rs GDB server exposed as a library that serves RSP against a worker-owned, borrowed Session. Engine files are extracted from the pinned probe-rs GDB source with the documented library-exposure and test-module deltas; see EXTRACTION.md."
 publish = false
 
 [dependencies]
 # The fork's own patched core crate. The GDB server only borrows its Session;
 # builtin-formats provides the flashing types the GDB flash-load path borrows.
+# Kept as a direct path dep (not `workspace = true`): the workspace `probe-rs`
+# dependency uses default features, and Cargo forbids overriding `default-features`
+# on an inherited dependency, so the required `default-features = false` selection
+# can only be expressed directly.
 probe-rs = { path = "../probe-rs", default-features = false, features = ["builtin-formats"] }
+anyhow.workspace = true
 
-# Matched to probe-rs-tools @ 48f5e4d53c690a1d40c2454033c6f785b4f4f95c
-# (the GDB stub's own dependencies).
+# Matched to probe-rs-tools @ 48f5e4d53c690a1d40c2454033c6f785b4f4f95c (the GDB
+# stub's own dependencies). Upstream declares these as plain version deps, not
+# workspace deps, so they stay literal here as the fork-specific GDB selection.
 gdbstub = "=0.7.8"
 parking_lot = "0.12.2"
-anyhow = "1"
 itertools = "0.15"
 tracing = "0.1"
 
 [dev-dependencies]
-# Borrowed-session seam proof (tests/borrowed_session_seam.rs).
-probe-rs = { path = "../probe-rs", default-features = false, features = ["builtin-formats"] }
-parking_lot = "0.12.2"
-anyhow = "1"
+# extraction_drift.rs hashes the pinned source and extracted files against the
+# committed baseline in tests/pinned_gdb_server.sha256.
+sha2 = "0.10"
+hex = "0.4"
+
+[lints]
+workspace = true
