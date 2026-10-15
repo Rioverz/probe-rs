@@ -6,7 +6,7 @@ use crate::{
         xtensa::sequences::{DefaultXtensaSequence, XtensaDebugSequence},
     },
     config::DebugSequence,
-    error::{BreakpointError, Error},
+    error::{BreakpointError, Error, WatchpointError},
     memory::CoreMemoryInterface,
 };
 pub use probe_rs_target::{Architecture, CoreAccessOptions};
@@ -32,6 +32,17 @@ pub use registers::*;
 pub struct CoreInformation {
     /// The current Program Counter.
     pub pc: u64,
+}
+
+/// The data accesses a hardware watchpoint halts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchpointAccess {
+    /// A read of the watched address.
+    Read,
+    /// A write of the watched address.
+    Write,
+    /// A read or a write of the watched address.
+    ReadWrite,
 }
 
 /// A generic interface to control a MCU core.
@@ -91,6 +102,32 @@ pub trait CoreInterface: MemoryInterface {
 
     /// Clears the breakpoint configured in unit `unit_index`.
     fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error>;
+
+    /// Returns the number of hardware watchpoint units of the core. A core without a
+    /// watchpoint implementation reports none.
+    fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        Ok(0)
+    }
+
+    /// The address each hardware watchpoint unit watches, `None` for a free unit.
+    fn hw_watchpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
+        Ok(vec![])
+    }
+
+    /// Sets a watchpoint on `addr` for `access`, using unit `unit_index`.
+    fn set_hw_watchpoint(
+        &mut self,
+        _unit_index: usize,
+        _addr: u64,
+        _access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        Err(Error::NotImplemented("hardware watchpoints"))
+    }
+
+    /// Clears the watchpoint configured in unit `unit_index`.
+    fn clear_hw_watchpoint(&mut self, _unit_index: usize) -> Result<(), Error> {
+        Err(Error::NotImplemented("hardware watchpoints"))
+    }
 
     /// Returns a list of all the registers of this core.
     fn registers(&self) -> &'static CoreRegisters;
@@ -490,6 +527,58 @@ impl<'probe> Core<'probe> {
         Ok(())
     }
 
+    /// Returns the number of hardware watchpoint units of the core.
+    pub fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        self.inner.available_watchpoint_units()
+    }
+
+    /// Set a hardware watchpoint
+    ///
+    /// This function will try to set a hardware watchpoint on `address` for `access`, re-using
+    /// the unit that already watches `address` if there is one.
+    #[tracing::instrument(skip(self))]
+    pub fn set_hw_watchpoint(
+        &mut self,
+        address: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        let watchpoints = self.inner.hw_watchpoints()?;
+        let unit_index = match watchpoints.iter().position(|&wp| wp == Some(address)) {
+            Some(unit_index) => unit_index,
+            None => watchpoints
+                .iter()
+                .position(|wp| wp.is_none())
+                .ok_or(WatchpointError::NoFreeUnit)?,
+        };
+        self.inner.set_hw_watchpoint(unit_index, address, access)
+    }
+
+    /// Clear a hardware watchpoint
+    ///
+    /// This function will try to clear the hardware watchpoint on `address`.
+    #[tracing::instrument(skip(self))]
+    pub fn clear_hw_watchpoint(&mut self, address: u64) -> Result<(), Error> {
+        let unit_index = self
+            .inner
+            .hw_watchpoints()?
+            .iter()
+            .position(|&wp| wp == Some(address))
+            .ok_or(WatchpointError::NotFound(address))?;
+        self.inner.clear_hw_watchpoint(unit_index)
+    }
+
+    /// Clear all hardware watchpoints
+    ///
+    /// This function will clear every hardware watchpoint configured on the target, whoever set it.
+    /// Also used as a helper function in [`Session::drop`](crate::session::Session).
+    #[tracing::instrument(skip(self))]
+    pub fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        for watchpoint in (self.inner.hw_watchpoints()?).into_iter().flatten() {
+            self.clear_hw_watchpoint(watchpoint)?
+        }
+        Ok(())
+    }
+
     /// Returns the architecture of the core.
     pub fn architecture(&self) -> Architecture {
         self.inner.architecture()
@@ -613,6 +702,27 @@ impl CoreInterface for Core<'_> {
     fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error> {
         self.inner.clear_hw_breakpoint(unit_index)?;
         Ok(())
+    }
+
+    fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        self.inner.available_watchpoint_units()
+    }
+
+    fn hw_watchpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
+        self.inner.hw_watchpoints()
+    }
+
+    fn set_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        self.inner.set_hw_watchpoint(unit_index, addr, access)
+    }
+
+    fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        self.inner.clear_hw_watchpoint(unit_index)
     }
 
     fn registers(&self) -> &'static CoreRegisters {

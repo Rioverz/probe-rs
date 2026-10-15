@@ -97,9 +97,9 @@ pub use crate::core::registers::UnwindRule;
 pub use crate::core::{
     Architecture, BreakpointCause, Core, CoreInformation, CoreInterface, CoreRegister,
     CoreRegisters, CoreState, CoreStatus, HaltReason, MemoryMappedRegister, RegisterId,
-    RegisterRole, RegisterValue, SpecificCoreState, VectorCatchCondition,
+    RegisterRole, RegisterValue, SpecificCoreState, VectorCatchCondition, WatchpointAccess,
 };
-pub use crate::error::{BreakpointError, Error};
+pub use crate::error::{BreakpointError, Error, WatchpointError};
 pub use crate::memory::MemoryInterface;
 pub use crate::session::{Permissions, Session, SessionConfig};
 

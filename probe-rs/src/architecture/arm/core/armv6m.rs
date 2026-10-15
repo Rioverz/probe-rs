@@ -5,8 +5,8 @@ use crate::{
     Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
     CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
     architecture::arm::{ArmError, memory::ArmMemoryInterface, sequences::ArmDebugSequence},
-    core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
-    error::Error,
+    core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition, WatchpointAccess},
+    error::{Error, WatchpointError},
     memory::{CoreMemoryInterface, valid_32bit_address},
 };
 use bitfield::bitfield;
@@ -403,6 +403,40 @@ impl From<Demcr> for u32 {
 impl MemoryMappedRegister<u32> for Demcr {
     const ADDRESS_OFFSET: u64 = 0xe000_edfc;
     const NAME: &'static str = "DEMCR";
+}
+
+// The DWT data watchpoints (ARMv6-M Architecture Reference Manual C1.8; values as libopencm3's
+// `dwt.h` gives them for ARMv6-M, until a bench run on a Cortex-M0 confirms them).
+/// DWT_CTRL; `NUMCOMP`, the number of comparators, is bits [31:28].
+const DWT_CTRL: u64 = 0xE000_1000;
+/// DWT_COMP0; each comparator's COMP, MASK and FUNCTION registers follow at +0, +4 and +8,
+/// and comparator `n` is `DWT_COMPARATOR_STRIDE * n` further on.
+const DWT_COMP0: u64 = 0xE000_1020;
+const DWT_COMPARATOR_STRIDE: u64 = 0x10;
+const DWT_MASK_OFFSET: u64 = 0x4;
+const DWT_FUNCTION_OFFSET: u64 = 0x8;
+/// MASK: the number of low address bits the comparison ignores; 2 watches one aligned word.
+const DWT_MASK_WORD: u32 = 2;
+/// FUNCTION[3:0] for a disabled comparator.
+const DWT_FUNCTION_DISABLED: u32 = 0b0000;
+const DWT_FUNCTION_MASK: u32 = 0b1111;
+
+/// The COMP, MASK and FUNCTION values of a watchpoint on the word at `address`.
+fn watchpoint_registers(address: u32, access: WatchpointAccess) -> Result<(u32, u32, u32), Error> {
+    if !address.is_multiple_of(4) {
+        return Err(WatchpointError::NotWordAligned(address.into()).into());
+    }
+    let function = match access {
+        WatchpointAccess::Read => 0b0101,
+        WatchpointAccess::Write => 0b0110,
+        WatchpointAccess::ReadWrite => 0b0111,
+    };
+    Ok((address, DWT_MASK_WORD, function))
+}
+
+/// The address of comparator `unit`'s COMP register.
+fn dwt_comparator(unit: usize) -> u64 {
+    DWT_COMP0 + DWT_COMPARATOR_STRIDE * unit as u64
 }
 
 /// The state of a core that can be used to persist core state across calls to multiple different cores.
@@ -875,6 +909,64 @@ impl CoreInterface for Armv6m<'_> {
         Ok(())
     }
 
+    fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        Ok(self.memory.read_word_32(DWT_CTRL)? >> 28)
+    }
+
+    fn hw_watchpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
+        let units = self.available_watchpoint_units()? as usize;
+        let mut watchpoints = Vec::with_capacity(units);
+        for unit in 0..units {
+            let comparator = dwt_comparator(unit);
+            let function = self.memory.read_word_32(comparator + DWT_FUNCTION_OFFSET)?;
+            if function & DWT_FUNCTION_MASK == DWT_FUNCTION_DISABLED {
+                watchpoints.push(None);
+            } else {
+                watchpoints.push(Some(self.memory.read_word_32(comparator)?.into()));
+            }
+        }
+        Ok(watchpoints)
+    }
+
+    fn set_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        let (comp, mask, function) = watchpoint_registers(valid_32bit_address(addr)?, access)?;
+
+        // The comparators act only while the DWT is enabled. It stays enabled after the
+        // watchpoint is cleared: a trace user may need it, and a disabled comparator does nothing.
+        let mut demcr = Demcr(self.memory.read_word_32(Demcr::get_mmio_address())?);
+        if !demcr.dwtena() {
+            demcr.set_dwtena(true);
+            self.memory
+                .write_word_32(Demcr::get_mmio_address(), demcr.into())?;
+        }
+
+        let comparator = dwt_comparator(unit_index);
+        // Disabled first, so the comparator never matches with half its new settings.
+        self.memory
+            .write_word_32(comparator + DWT_FUNCTION_OFFSET, DWT_FUNCTION_DISABLED)?;
+        self.memory.write_word_32(comparator, comp)?;
+        self.memory
+            .write_word_32(comparator + DWT_MASK_OFFSET, mask)?;
+        self.memory
+            .write_word_32(comparator + DWT_FUNCTION_OFFSET, function)?;
+        self.memory.flush()?;
+        Ok(())
+    }
+
+    fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        self.memory.write_word_32(
+            dwt_comparator(unit_index) + DWT_FUNCTION_OFFSET,
+            DWT_FUNCTION_DISABLED,
+        )?;
+        self.memory.flush()?;
+        Ok(())
+    }
+
     fn registers(&self) -> &'static CoreRegisters {
         &CORTEX_M_CORE_REGISTERS
     }
@@ -1003,5 +1095,41 @@ impl CoreMemoryInterface for Armv6m<'_> {
     }
     fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
         self.memory.as_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_watchpoint_watches_one_aligned_word_for_its_access() {
+        for (access, function) in [
+            (WatchpointAccess::Read, 0b0101),
+            (WatchpointAccess::Write, 0b0110),
+            (WatchpointAccess::ReadWrite, 0b0111),
+        ] {
+            assert_eq!(
+                watchpoint_registers(0x2000_0100, access).unwrap(),
+                (0x2000_0100, 2, function)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unaligned_watchpoint_is_refused() {
+        for address in [0x2000_0101, 0x2000_0102, 0x2000_0103] {
+            assert!(matches!(
+                watchpoint_registers(address, WatchpointAccess::Write),
+                Err(Error::WatchpointOperation(WatchpointError::NotWordAligned(a))) if a == u64::from(address)
+            ));
+        }
+    }
+
+    #[test]
+    fn comparators_are_sixteen_bytes_apart_from_dwt_comp0() {
+        assert_eq!(dwt_comparator(0), 0xE000_1020);
+        assert_eq!(dwt_comparator(1), 0xE000_1030);
+        assert_eq!(dwt_comparator(1) + DWT_FUNCTION_OFFSET, 0xE000_1038);
     }
 }

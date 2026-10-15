@@ -73,12 +73,26 @@ pub enum Error {
 
     /// Error during breakpoint configuration
     BreakpointOperation(#[from] BreakpointError),
+
+    /// Error during watchpoint configuration
+    WatchpointOperation(#[from] WatchpointError),
 }
 
 /// Errors that occur during breakpoint configuration
 #[derive(thiserror::Error, Debug, docsplay::Display)]
 pub enum BreakpointError {
     /// No breakpoint found at address {0:#010x}
+    NotFound(u64),
+}
+
+/// Errors that occur during watchpoint configuration
+#[derive(thiserror::Error, Debug, docsplay::Display)]
+pub enum WatchpointError {
+    /// No free hardware watchpoint unit
+    NoFreeUnit,
+    /// The watchpoint address {0:#010x} is not word-aligned
+    NotWordAligned(u64),
+    /// No watchpoint found at address {0:#010x}
     NotFound(u64),
 }
 

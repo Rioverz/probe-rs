@@ -1002,6 +1002,19 @@ impl Session {
         }
     }
 
+    /// Clears all hardware watchpoints on all cores.
+    ///
+    /// Unlike the breakpoint clear, no core is halted: a core reports its watchpoints and has
+    /// them cleared through its debug registers while it runs, and a core without a watchpoint
+    /// implementation reports none.
+    pub fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        { 0..self.cores.len() }.try_for_each(|core| match self.core(core) {
+            Ok(mut core) => core.clear_all_hw_watchpoints(),
+            Err(Error::CoreDisabled(_)) => Ok(()),
+            Err(err) => Err(err),
+        })
+    }
+
     /// Clears all hardware breakpoints on all cores
     pub fn clear_all_hw_breakpoints(&mut self) -> Result<(), Error> {
         self.halted_access(|session| {
@@ -1057,6 +1070,13 @@ impl Drop for Session {
         if let Err(err) = self.clear_all_hw_breakpoints() {
             tracing::warn!(
                 "Could not clear all hardware breakpoints: {:?}",
+                anyhow::anyhow!(err)
+            );
+        }
+
+        if let Err(err) = self.clear_all_hw_watchpoints() {
+            tracing::warn!(
+                "Could not clear all hardware watchpoints: {:?}",
                 anyhow::anyhow!(err)
             );
         }
