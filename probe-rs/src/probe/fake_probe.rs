@@ -840,4 +840,39 @@ mod test {
             .attach("nrf51822_xxAC", Permissions::default())
             .unwrap();
     }
+
+    // A step leaves C_STEP and C_MASKINTS set in DHCSR. A reset, halting or not, must clear
+    // both and keep C_DEBUGEN, or the core comes out of reset single-stepping with
+    // interrupts masked.
+    #[test]
+    fn reset_after_a_step_clears_the_step_and_mask_bits() {
+        use crate::architecture::arm::core::armv8m::Dhcsr;
+        use crate::{MemoryInterface, MemoryMappedRegister};
+        use std::time::Duration;
+
+        // ARMv6-M, ARMv7-M and ARMv8-M.
+        for chip in ["nrf51822_xxAC", "STM32F103C8", "STM32L552CC"] {
+            let mut session = FakeProbe::with_mocked_core()
+                .into_probe()
+                .attach(chip, Permissions::default())
+                .unwrap();
+            let mut core = session.core(0).unwrap();
+            for halt_after_reset in [false, true] {
+                core.halt(Duration::from_millis(100)).unwrap();
+                core.step().unwrap();
+                if halt_after_reset {
+                    core.reset_and_halt(Duration::from_millis(100)).unwrap();
+                } else {
+                    core.reset().unwrap();
+                }
+
+                let dhcsr = Dhcsr(core.read_word_32(Dhcsr::ADDRESS_OFFSET).unwrap());
+                assert!(
+                    !dhcsr.c_step() && !dhcsr.c_maskints() && dhcsr.c_debugen(),
+                    "{chip} (halt after reset: {halt_after_reset}): DHCSR {:#010x}",
+                    u32::from(dhcsr)
+                );
+            }
+        }
+    }
 }

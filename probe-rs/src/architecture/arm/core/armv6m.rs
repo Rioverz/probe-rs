@@ -622,6 +622,18 @@ impl CoreInterface for Armv6m<'_> {
         self.state.semihosting_command = None;
         self.state.clear_pending_step();
 
+        // A step leaves C_STEP and C_MASKINTS set, and a system reset clears neither, so
+        // the core would come out of reset still single-stepping with interrupts masked.
+        let mut dhcsr = Dhcsr(self.memory.read_word_32(Dhcsr::get_mmio_address())?);
+        if dhcsr.c_step() || dhcsr.c_maskints() {
+            dhcsr.set_c_step(false);
+            dhcsr.set_c_maskints(false);
+            dhcsr.enable_write();
+            self.memory
+                .write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
+            self.memory.flush()?;
+        }
+
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv6m, None)?;
         // Invalidate cached state: chip reset clears FP_CTRL and core status
@@ -633,6 +645,19 @@ impl CoreInterface for Armv6m<'_> {
     fn reset_and_halt(&mut self, _timeout: Duration) -> Result<CoreInformation, Error> {
         self.reset_catch_set()?;
         self.state.clear_pending_step();
+
+        // As in reset(): the core must not keep the C_STEP and C_MASKINTS a step left set.
+        // A step leaves C_HALT clear, so set it to keep the core halted until the reset.
+        let mut dhcsr = Dhcsr(self.memory.read_word_32(Dhcsr::get_mmio_address())?);
+        if dhcsr.c_step() || dhcsr.c_maskints() {
+            dhcsr.set_c_step(false);
+            dhcsr.set_c_maskints(false);
+            dhcsr.set_c_halt(true);
+            dhcsr.enable_write();
+            self.memory
+                .write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
+            self.memory.flush()?;
+        }
 
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv6m, None)?;
