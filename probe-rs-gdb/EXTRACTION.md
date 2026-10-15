@@ -1,6 +1,6 @@
-# OPI-GDB-LIB extraction manifest
+# GDB server library extraction manifest
 
-This crate exposes the probe-rs GDB server as a library so an OPI worker can
+This crate exposes the probe-rs GDB server as a library so a caller can
 serve GDB by borrowing its already-owned `&FairMutex<Session>`, instead of the
 CLI path that opens the probe a second time via `simple_attach`.
 
@@ -27,8 +27,8 @@ checks.
 | `src/gdb/stub.rs` | `gdb_server/stub.rs` | text-identical (modulo line endings) |
 | `src/gdb/arch.rs` | `gdb_server/arch.rs` | text-identical (modulo line endings) |
 | `src/gdb/target/**` | `gdb_server/target/**` | text-identical, except `target/desc/mod.rs` (delta #2) |
-| `src/gdb/mod.rs` | `gdb_server/mod.rs` | rewritten — OPI-authored (delta #1) |
-| `src/lib.rs` | — | OPI-authored library entry |
+| `src/gdb/mod.rs` | `gdb_server/mod.rs` | rewritten — authored in this fork (delta #1) |
+| `src/lib.rs` | — | library entry authored in this fork |
 
 ## Two documented deltas from the pinned source
 
@@ -73,14 +73,14 @@ probe-rs is dual-licensed `MIT OR Apache-2.0` (`Copyright (c) 2019 probe-rs`).
 This crate inherits the workspace `license = "MIT OR Apache-2.0"`, and the license
 texts live at the fork root (`LICENSE-MIT`, `LICENSE-APACHE`) — the same probe-rs
 terms that cover the copied files (`src/gdb/stub.rs`, `src/gdb/arch.rs`, all of
-`src/gdb/target/`). `src/gdb/mod.rs` and `src/lib.rs` are OPI-authored under the
+`src/gdb/target/`). `src/gdb/mod.rs` and `src/lib.rs` are authored in this fork under the
 same dual license.
 
 ## Lint scoping
 
 The borrowed subtree carries a narrowly-scoped module-level
 `#[allow(warnings, clippy::all)]` on `mod arch/stub/target` in `src/gdb/mod.rs`,
-so `-D warnings` reflects only the OPI-authored library exposure. No broad
+so `-D warnings` reflects only the library exposure written in this fork. No broad
 crate-level warning suppression is used.
 
 ## Guarantee tests

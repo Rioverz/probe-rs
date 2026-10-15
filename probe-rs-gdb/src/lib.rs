@@ -1,8 +1,8 @@
-//! OPI-GDB-LIB: the probe-rs GDB server as a library over a borrowed session.
+//! The probe-rs GDB server as a library over a borrowed session.
 //!
 //! Upstream probe-rs `0.32.0` ships its GDB server as tool-internal
 //! (`probe-rs-tools`) code whose CLI wrapper opens the probe with
-//! `simple_attach`. The OPI Hub worker already owns the authoritative
+//! `simple_attach`. A caller such as a debug worker already owns the authoritative
 //! `probe_rs::Session` behind a `FairMutex`; it must serve GDB by *borrowing*
 //! that session, never by opening the probe a second time.
 //!
@@ -14,8 +14,7 @@
 //! its own (guarded by `tests/no_independent_attach.rs`).
 //!
 //! Removal condition: drop this extraction when a published upstream release
-//! exposes the GDB server as a library the production pin can depend on
-//! directly (see `../provenance` in the OPI Hub repository, patch OPI-GDB-LIB).
+//! exposes the GDB server as a library that callers can depend on directly.
 
 pub mod gdb;
 
