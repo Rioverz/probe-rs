@@ -182,11 +182,18 @@ fn get_cmsisdap_info(device: &DeviceInfo, list_both_versions: bool) -> Vec<Debug
     results
 }
 
+/// What a CMSIS-DAP v2 open found: the device, or none, with the error of the
+/// last interface claim that failed if one did.
+pub enum V2Open {
+    Opened(CmsisDapDevice),
+    NotOpened(Option<io::Error>),
+}
+
 /// Attempt to open the given device in CMSIS-DAP v2 mode
 pub fn open_v2_device(
     device_info: &DeviceInfo,
     selected_interface: Option<u8>,
-) -> Result<Option<CmsisDapDevice>, ProbeCreationError> {
+) -> Result<V2Open, ProbeCreationError> {
     // Open device handle and read basic information
     let vid = device_info.vendor_id();
     let pid = device_info.product_id();
@@ -206,7 +213,7 @@ pub fn open_v2_device(
                 error = %e,
                 "failed to open device for CMSIS-DAP v2"
             );
-            return Ok(None);
+            return Ok(V2Open::NotOpened(None));
         }
     };
 
@@ -218,8 +225,9 @@ pub fn open_v2_device(
     // endpoints of the correct type and direction.
     let Some(c_desc) = device.configurations().next() else {
         tracing::trace!("No cmsis-dap v2 interface found");
-        return Ok(None);
+        return Ok(V2Open::NotOpened(None));
     };
+    let mut claim_error = None;
     for interface in c_desc.interfaces() {
         tracing::trace!("Checking interface {}", interface.interface_number());
         if let Some(iface) = selected_interface
@@ -323,7 +331,7 @@ pub fn open_v2_device(
                         None => None,
                     };
 
-                    return Ok(Some(CmsisDapDevice::V2 {
+                    return Ok(V2Open::Opened(CmsisDapDevice::V2 {
                         handle,
                         out_ep,
                         in_ep,
@@ -338,6 +346,7 @@ pub fn open_v2_device(
                         error = %e,
                         "failed to claim interface"
                     );
+                    claim_error = Some(e.into());
                     continue;
                 }
             }
@@ -350,7 +359,13 @@ pub fn open_v2_device(
         vid,
         pid
     );
-    Ok(None)
+    Ok(V2Open::NotOpened(claim_error))
+}
+
+/// The error for a selector that no CMSIS-DAP mode could open: a kept
+/// interface claim error says why, otherwise the probe is not one of ours.
+fn not_opened(claim_error: Option<io::Error>) -> ProbeCreationError {
+    claim_error.map_or(ProbeCreationError::NotFound, ProbeCreationError::Usb)
 }
 
 fn reject_probe_by_version(
@@ -397,6 +412,9 @@ pub fn open_device_from_selector(
     // try to open that.
     #[cfg(feature = "cmsisdap_v1")]
     let mut hid_device_info = None;
+    // Why a v2 interface could not be claimed, reported if no mode opens the
+    // probe.
+    let mut claim_error = None;
 
     // Try using nusb to open a v2 device. This might fail if
     // the device does not support v2 operation or due to driver
@@ -417,13 +435,19 @@ pub fn open_device_from_selector(
                     // If the VID, PID, and potentially SN all match,
                     // and the device is a valid CMSIS-DAP probe,
                     // attempt to open the device in v2 mode.
-                    if let Some(opened) = open_v2_device(&device, device_info.interface)? {
-                        return Ok((opened, device.product_string().map(str::to_owned)));
-                    } else {
-                        #[cfg(feature = "cmsisdap_v1")]
-                        {
-                            // Otherwise, save as a potential CMSIS-DAP v1 HID device and continue.
-                            hid_device_info = Some(device_info);
+                    match open_v2_device(&device, device_info.interface)? {
+                        V2Open::Opened(opened) => {
+                            return Ok((opened, device.product_string().map(str::to_owned)));
+                        }
+                        V2Open::NotOpened(error) => {
+                            if error.is_some() {
+                                claim_error = error;
+                            }
+                            #[cfg(feature = "cmsisdap_v1")]
+                            {
+                                // Otherwise, save as a potential CMSIS-DAP v1 HID device and continue.
+                                hid_device_info = Some(device_info);
+                            }
                         }
                     }
                 }
@@ -437,10 +461,13 @@ pub fn open_device_from_selector(
     }
 
     #[cfg(not(feature = "cmsisdap_v1"))]
-    return Err(ProbeCreationError::NotFound);
+    return Err(not_opened(claim_error));
 
     #[cfg(feature = "cmsisdap_v1")]
-    v1::open_device(selector, hid_device_info)
+    v1::open_device(selector, hid_device_info).map_err(|error| match error {
+        ProbeCreationError::NotFound => not_opened(claim_error),
+        error => error,
+    })
 }
 
 /// We recognise cmsis dap interfaces if they have string like "CMSIS-DAP"
@@ -492,7 +519,7 @@ pub(super) fn loses_pipelined_replies(product: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::loses_pipelined_replies;
+    use super::*;
 
     #[test]
     fn old_xds110_firmware_loses_pipelined_replies() {
@@ -503,5 +530,23 @@ mod tests {
             "XDS110 (03.00.00.45) Embed with CMSIS-DAP"
         ));
         assert!(!loses_pipelined_replies("DAPLink CMSIS-DAP"));
+    }
+
+    #[test]
+    fn a_kept_claim_error_is_reported_and_none_means_not_found() {
+        assert!(matches!(not_opened(None), ProbeCreationError::NotFound));
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            not_opened(Some(denied)),
+            ProbeCreationError::Usb(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn the_os_cause_of_a_failed_claim_is_the_error_source() {
+        let error = not_opened(Some(io::Error::from_raw_os_error(5)));
+        let source = std::error::Error::source(&error).expect("the claim error is the source");
+        let cause = source.downcast_ref::<io::Error>().expect("an io::Error");
+        assert_eq!(cause.raw_os_error(), Some(5));
     }
 }
