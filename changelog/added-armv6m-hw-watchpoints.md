@@ -1,0 +1,1 @@
+Added hardware data watchpoints on ARMv6-M cores (`Core::set_hw_watchpoint`, `clear_hw_watchpoint`, `clear_all_hw_watchpoints`, `Session::clear_all_hw_watchpoints`); a dropped session clears them. The DWT register values follow libopencm3's `dwt.h` for ARMv6-M until a bench run on a Cortex-M0 confirms them. Other cores report no watchpoint units.
