@@ -202,11 +202,18 @@ fn get_cmsisdap_hid_info(device: &hidapi::DeviceInfo) -> Option<DebugProbeInfo> 
     }
 }
 
+/// What a CMSIS-DAP v2 open found: the device, or none, with the error of the
+/// last interface claim that failed if one did.
+pub enum V2Open {
+    Opened(CmsisDapDevice),
+    NotOpened(Option<io::Error>),
+}
+
 /// Attempt to open the given device in CMSIS-DAP v2 mode
 pub fn open_v2_device(
     device_info: &DeviceInfo,
     selected_interface: Option<u8>,
-) -> Result<Option<CmsisDapDevice>, ProbeCreationError> {
+) -> Result<V2Open, ProbeCreationError> {
     // Open device handle and read basic information
     let vid = device_info.vendor_id();
     let pid = device_info.product_id();
@@ -226,7 +233,7 @@ pub fn open_v2_device(
                 error = %e,
                 "failed to open device for CMSIS-DAP v2"
             );
-            return Ok(None);
+            return Ok(V2Open::NotOpened(None));
         }
     };
 
@@ -238,8 +245,9 @@ pub fn open_v2_device(
     // endpoints of the correct type and direction.
     let Some(c_desc) = device.configurations().next() else {
         tracing::trace!("No cmsis-dap v2 interface found");
-        return Ok(None);
+        return Ok(V2Open::NotOpened(None));
     };
+    let mut claim_error = None;
     for interface in c_desc.interfaces() {
         tracing::trace!("Checking interface {}", interface.interface_number());
         if let Some(iface) = selected_interface
@@ -334,7 +342,7 @@ pub fn open_v2_device(
                         None => None,
                     };
 
-                    return Ok(Some(CmsisDapDevice::V2 {
+                    return Ok(V2Open::Opened(CmsisDapDevice::V2 {
                         handle,
                         out_ep,
                         in_ep,
@@ -349,6 +357,7 @@ pub fn open_v2_device(
                         error = %e,
                         "failed to claim interface"
                     );
+                    claim_error = Some(e.into());
                     continue;
                 }
             }
@@ -361,7 +370,13 @@ pub fn open_v2_device(
         vid,
         pid
     );
-    Ok(None)
+    Ok(V2Open::NotOpened(claim_error))
+}
+
+/// The error for a selector that no CMSIS-DAP mode could open: a kept
+/// interface claim error says why, otherwise the probe is not one of ours.
+fn not_opened(claim_error: Option<io::Error>) -> ProbeCreationError {
+    claim_error.map_or(ProbeCreationError::NotFound, ProbeCreationError::Usb)
 }
 
 fn reject_probe_by_version(
@@ -406,6 +421,9 @@ pub fn open_device_from_selector(
     // try to open that.
     #[cfg(feature = "cmsisdap_v1")]
     let mut hid_device_info = None;
+    // Why a v2 interface could not be claimed, reported if no mode opens the
+    // probe.
+    let mut claim_error = None;
 
     // Try using nusb to open a v2 device. This might fail if
     // the device does not support v2 operation or due to driver
@@ -426,13 +444,17 @@ pub fn open_device_from_selector(
                     // If the VID, PID, and potentially SN all match,
                     // and the device is a valid CMSIS-DAP probe,
                     // attempt to open the device in v2 mode.
-                    if let Some(device) = open_v2_device(&device, device_info.interface)? {
-                        return Ok(device);
-                    } else {
-                        #[cfg(feature = "cmsisdap_v1")]
-                        {
-                            // Otherwise, save as a potential CMSIS-DAP v1 HID device and continue.
-                            hid_device_info = Some(device_info);
+                    match open_v2_device(&device, device_info.interface)? {
+                        V2Open::Opened(device) => return Ok(device),
+                        V2Open::NotOpened(error) => {
+                            if error.is_some() {
+                                claim_error = error;
+                            }
+                            #[cfg(feature = "cmsisdap_v1")]
+                            {
+                                // Otherwise, save as a potential CMSIS-DAP v1 HID device and continue.
+                                hid_device_info = Some(device_info);
+                            }
                         }
                     }
                 }
@@ -446,7 +468,7 @@ pub fn open_device_from_selector(
     }
 
     #[cfg(not(feature = "cmsisdap_v1"))]
-    return Err(ProbeCreationError::NotFound);
+    return Err(not_opened(claim_error));
 
     #[cfg(feature = "cmsisdap_v1")]
     {
@@ -464,7 +486,7 @@ pub fn open_device_from_selector(
         // Attempt to open provided VID/PID/SN with hidapi
 
         let Ok(hid_api) = HidApi::new() else {
-            return Err(ProbeCreationError::NotFound);
+            return Err(not_opened(claim_error));
         };
 
         let mut device_list = hid_api.device_list();
@@ -489,10 +511,10 @@ pub fn open_device_from_selector(
 
                 device_match
             })
-            .ok_or(ProbeCreationError::NotFound)?;
+            .ok_or_else(|| not_opened(claim_error.take()))?;
 
         let Ok(device) = device_info.open_device(&hid_api) else {
-            return Err(ProbeCreationError::NotFound);
+            return Err(not_opened(claim_error));
         };
 
         match device.get_product_string() {
@@ -511,8 +533,9 @@ pub fn open_device_from_selector(
             _ => {
                 // Return NotFound if this VID:PID was not a valid CMSIS-DAP probe,
                 // or if it couldn't be opened, so that other probe modules can
-                // attempt to open it instead.
-                Err(ProbeCreationError::NotFound)
+                // attempt to open it instead; a kept v2 claim error says why
+                // it could not be opened.
+                Err(not_opened(claim_error))
             }
         }
     }
@@ -563,4 +586,27 @@ fn hid_report_size(device: &hidapi::DeviceInfo) -> usize {
     // Devices are queried at startup for their packet size so it can usually be increased quickly
     // if needed; only some devices are annoying to query the packet size so are worth an override.
     64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_claim_error_is_reported_and_none_means_not_found() {
+        assert!(matches!(not_opened(None), ProbeCreationError::NotFound));
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            not_opened(Some(denied)),
+            ProbeCreationError::Usb(error) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
+
+    #[test]
+    fn the_os_cause_of_a_failed_claim_is_the_error_source() {
+        let error = not_opened(Some(io::Error::from_raw_os_error(5)));
+        let source = std::error::Error::source(&error).expect("the claim error is the source");
+        let cause = source.downcast_ref::<io::Error>().expect("an io::Error");
+        assert_eq!(cause.raw_os_error(), Some(5));
+    }
 }
