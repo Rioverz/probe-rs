@@ -1,4 +1,4 @@
-//! Extraction drift check (OPI-GDB-LIB): normalized hashes of the in-fork GDB
+//! Extraction drift check: normalized hashes of the in-fork GDB
 //! source and the extracted crate are bound to the committed baseline of the
 //! pinned probe-rs revision in `tests/pinned_gdb_server.sha256`. Newline-normalized,
 //! so it is identical on CRLF and LF checkouts. See EXTRACTION.md for the deltas.
@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 
 const PINNED_REV: &str = "48f5e4d53c690a1d40c2454033c6f785b4f4f95c";
 
-// gdb_server/mod.rs is OPI-authored (delta #1), not an extracted engine file.
-const OPI_AUTHORED: &[&str] = &["mod.rs"];
+// gdb_server/mod.rs is authored in this fork (delta #1), not an extracted engine file.
+const NOT_EXTRACTED: &[&str] = &["mod.rs"];
 const DESC_MOD_REL: &str = "target/desc/mod.rs";
 const DESC_TEST_REL: &str = "target/desc/test.rs";
 
@@ -142,7 +142,7 @@ fn verify(
 
     // Extracted crate matches the baseline, except the documented deltas.
     for (rel, want) in baseline {
-        if OPI_AUTHORED.contains(&rel.as_str()) {
+        if NOT_EXTRACTED.contains(&rel.as_str()) {
             continue;
         }
         if rel == DESC_TEST_REL {
@@ -171,7 +171,7 @@ fn verify(
 
     // No extra extracted engine file beyond the pinned set.
     for rel in extracted.keys() {
-        if OPI_AUTHORED.contains(&rel.as_str()) {
+        if NOT_EXTRACTED.contains(&rel.as_str()) {
             continue;
         }
         if !baseline.contains_key(rel) || rel == DESC_TEST_REL {

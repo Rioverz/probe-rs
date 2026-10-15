@@ -133,7 +133,7 @@ pub struct DownloadOptions<'p> {
     pub verify: bool,
     /// Disable double buffering when loading flash.
     pub disable_double_buffering: bool,
-    /// OPI qualification only: the caller has reset and halted the target,
+    /// Opt-in, for a caller that has reset and halted the target,
     /// confirmed a safe elevated target clock, and then raised SWD speed.
     /// Preserve that prepared state while loading the algorithm into RAM.
     pub preserve_prepared_target_clock: bool,

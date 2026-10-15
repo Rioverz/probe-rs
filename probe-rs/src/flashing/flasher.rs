@@ -1492,8 +1492,8 @@ impl ActiveFlasher<'_, '_, Program> {
 mod opi_clock_preserve_tests {
     use crate::flashing::{DownloadOptions, FlashError};
 
-    // OPI-CLOCK-PRESERVE must default to off so stock flashing behavior
-    // (reset-and-halt during setup) is unchanged unless a qualified caller opts in.
+    // Preserving the prepared target clock must default to off so stock flashing behavior
+    // (reset-and-halt during setup) is unchanged unless a caller opts in.
     #[test]
     fn preserve_prepared_target_clock_defaults_off() {
         assert!(!DownloadOptions::default().preserve_prepared_target_clock);

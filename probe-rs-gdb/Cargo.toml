@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 documentation.workspace = true
 homepage.workspace = true
-description = "OPI-GDB-LIB: the probe-rs GDB server exposed as a library that serves RSP against a worker-owned, borrowed Session. Engine files are extracted from the pinned probe-rs GDB source with the documented library-exposure and test-module deltas; see EXTRACTION.md."
+description = "The probe-rs GDB server exposed as a library that serves RSP against a caller-owned, borrowed Session. Engine files are extracted from the pinned probe-rs GDB source with the documented library-exposure and test-module deltas; see EXTRACTION.md."
 publish = false
 
 [dependencies]

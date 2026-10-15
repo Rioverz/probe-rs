@@ -1600,7 +1600,7 @@ mod tests {
         assert_eq!(usb_timeout, DEFAULT_USB_TIMEOUT);
     }
 
-    // AC-2 (Dwight): replies an earlier session left in the probe are drained
+    // Replies an earlier session left in the probe are drained
     // when it opens, so they are not read as the answers to the open.
     #[test]
     fn stale_replies_from_an_earlier_session_are_drained_when_the_probe_opens() {
@@ -1622,7 +1622,7 @@ mod tests {
         assert!(capabilities.unwrap().swd_implemented);
     }
 
-    // AC-2 (Dwight): a stale packet size reply from an earlier session, well
+    // A stale packet size reply from an earlier session, well
     // formed but with another size, is not taken as this probe's size.
     #[test]
     fn a_stale_packet_size_reply_is_not_taken_as_the_packet_size() {
@@ -1640,7 +1640,7 @@ mod tests {
         assert!(probe.lock().unwrap().owes_nothing());
     }
 
-    // AC-2 (Dwight): a transfer reply an earlier session still owed arrives
+    // A transfer reply an earlier session still owed arrives
     // after the open's first drain. The open asks again until its answers are
     // its own, and the stream is in step after it.
     #[test]
