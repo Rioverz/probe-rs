@@ -33,7 +33,8 @@ use crate::{
             commands::{
                 CmsisDapError, RequestError, SendError,
                 general::info::{
-                    CapabilitiesCommand, PacketCountCommand, SWOTraceBufferSizeCommand,
+                    CapabilitiesCommand, PacketCountCommand, PacketSizeCommand,
+                    SWOTraceBufferSizeCommand,
                 },
             },
         },
@@ -219,6 +220,7 @@ const BACKLOG_IDLE: Duration = Duration::from_millis(100);
 
 /// What `new_from_device` asks the probe about itself.
 struct ProbeInfo {
+    packet_size: u16,
     packet_count: u8,
     capabilities: Capabilities,
     swo_buffer_size: Option<usize>,
@@ -235,7 +237,9 @@ impl CmsisDap {
         // answer nothing at all until they receive a full one, which is what the retrying inside
         // here is for. Anything sent before it can go unanswered on those probes for reasons that
         // have nothing to do with the probe's state.
-        let packet_size = device.find_packet_size()? as u16;
+        // The size is only a first guess: a late stale reply can pass for it, so the size this
+        // probe keeps is the one `read_probe_info` reads in step.
+        device.find_packet_size()?;
 
         // A probe that still owes replies from an earlier session answers the start of this one
         // with the previous one's data. Drain properly, prompt out what it is holding, and ask
@@ -252,10 +256,12 @@ impl CmsisDap {
         }
 
         let ProbeInfo {
+            packet_size,
             packet_count,
             capabilities: caps,
             swo_buffer_size,
         } = info?;
+        device.set_packet_size(packet_size as usize);
 
         Ok(Self {
             device,
@@ -280,6 +286,9 @@ impl CmsisDap {
 
     fn read_probe_info(device: &mut CmsisDapDevice) -> Result<ProbeInfo, CmsisDapError> {
         // Read remaining probe information.
+        let packet_size = commands::send_command_once(device, &PacketSizeCommand {})?;
+        tracing::debug!("Probe packet size {}", packet_size);
+
         let packet_count = commands::send_command_once(device, &PacketCountCommand {})?;
         tracing::debug!("Probe buffers {} packets", packet_count);
 
@@ -305,6 +314,7 @@ impl CmsisDap {
         ))?;
 
         Ok(ProbeInfo {
+            packet_size,
             packet_count,
             capabilities,
             swo_buffer_size,
@@ -1487,6 +1497,86 @@ mod tests {
         assert_eq!(aborts, 1);
         let usb_timeout = probe.lock().unwrap().usb_timeout;
         assert_eq!(usb_timeout, DEFAULT_USB_TIMEOUT);
+    }
+
+    // A probe still busy with `stale` from an earlier session: its reply,
+    // `reply`, comes after the open's first drain, behind the open's own
+    // first command.
+    fn open_behind_a_late_stale_reply(
+        stale: &[u8],
+        reply: Vec<u8>,
+    ) -> (CmsisDap, Arc<std::sync::Mutex<FakeProbe>>) {
+        let mut late = Some(reply);
+        let probe = FakeProbe::shared(64, move |command| match late.take() {
+            Some(reply) => Reply::Held(reply),
+            None => standard_reply(command, 64, 4),
+        });
+        probe.lock().unwrap().write(stale);
+        let dap = CmsisDap::new_from_device(CmsisDapDevice::Fake(probe.clone())).unwrap();
+        (dap, probe)
+    }
+
+    // A capabilities reply without SWD that arrives after the drain is read
+    // where the packet size is expected; the open asks again and its
+    // answers are its own.
+    #[test]
+    fn a_late_stale_capabilities_reply_at_open_is_not_taken_as_an_answer() {
+        let (mut dap, probe) =
+            open_behind_a_late_stale_reply(&[0x00, 0xF0], vec![0x00, 0x01, 0x00]);
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert!(dap.capabilities.swd_implemented);
+        assert!(probe.lock().unwrap().owes_nothing());
+        let capabilities = commands::send_command(&mut dap.device, &CapabilitiesCommand {});
+        assert!(capabilities.unwrap().swd_implemented);
+    }
+
+    // A well formed packet size reply of 512 that arrives after the drain
+    // is not kept as the size of a 64 byte probe, nor set as its report
+    // size.
+    #[test]
+    fn a_late_stale_packet_size_reply_at_open_is_not_taken_as_the_size() {
+        let (mut dap, probe) =
+            open_behind_a_late_stale_reply(&[0x00, 0xFF], vec![0x00, 0x02, 0x00, 0x02]);
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert_eq!(probe.lock().unwrap().max_packet_size, 64);
+        assert!(probe.lock().unwrap().owes_nothing());
+        let capabilities = commands::send_command(&mut dap.device, &CapabilitiesCommand {});
+        assert!(capabilities.unwrap().swd_implemented);
+    }
+
+    // One late, well formed `DAP_Info` reply for every info read the open
+    // makes: each parses, so only the `DAP_HostStatus` request, answered
+    // by the open's own first packet size reply, shows the stream is out
+    // of step.
+    #[test]
+    fn a_late_stale_info_backlog_at_open_is_caught_by_the_host_status_check() {
+        let mut backlog = std::collections::VecDeque::from([
+            vec![0x00, 0x02, 0x00, 0x02],
+            vec![0x00, 0x02, 0x00, 0x02],
+            vec![0x00, 0x01, 0x08],
+            vec![0x00, 0x01, 0x01],
+        ]);
+        let probe = FakeProbe::shared(64, move |command| match backlog.pop_front() {
+            Some(reply) => Reply::Held(reply),
+            None => standard_reply(command, 64, 4),
+        });
+        for stale in [
+            &[0x00, 0xFF][..],
+            &[0x00, 0xFF],
+            &[0x00, 0xFE],
+            &[0x00, 0xF0],
+        ] {
+            probe.lock().unwrap().write(stale);
+        }
+        let mut dap = CmsisDap::new_from_device(CmsisDapDevice::Fake(probe.clone())).unwrap();
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert_eq!(probe.lock().unwrap().max_packet_size, 64);
+        assert!(probe.lock().unwrap().owes_nothing());
+        let capabilities = commands::send_command(&mut dap.device, &CapabilitiesCommand {});
+        assert!(capabilities.unwrap().swd_implemented);
     }
 
     #[test]
