@@ -421,7 +421,8 @@ impl CmsisDapDevice {
     /// packet worth of data before responding, but we don't know how much
     /// data that is before we get a response.
     ///
-    /// The device is then configured to use the detected size, which is returned.
+    /// The device is then configured to use the detected size, which is returned. A late reply
+    /// the probe still owed can pass for it, so the open reads the size again in step.
     pub(super) fn find_packet_size(&mut self) -> Result<usize, CmsisDapError> {
         // Use a short USB timeout when determining packet size as otherwise we wait
         // several seconds each time for enough data to accumulate.
@@ -443,12 +444,10 @@ impl CmsisDapDevice {
                     ..
                 }) => (),
 
-                // A reply to a command from before this device was opened. It has now been read
-                // and the rest of the queue discarded with it, so the next attempt gets its own.
-                Err(CmsisDapError::Send {
-                    source: SendError::CommandIdMismatch(..),
-                    ..
-                }) => (),
+                // A reply to a command from before this device was opened, under another ID or a
+                // `DAP_Info` reply that is not a packet size. It has now been read and the rest of
+                // the queue discarded with it, so the next attempt gets its own.
+                Err(e) if reply_is_not_ours(&e) => (),
 
                 // Raise other errors.
                 Err(e) => return Err(e),
