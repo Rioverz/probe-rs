@@ -8,13 +8,14 @@ CLI path that opens the probe a second time via `simple_attach`.
 
 - Upstream repo: `https://github.com/probe-rs/probe-rs`
 - Commit: `48f5e4d53c690a1d40c2454033c6f785b4f4f95c` (probe-rs v0.32.0)
-- Source directory (in this same fork): `probe-rs-tools/src/bin/probe-rs/cmd/gdb_server/`
+- Source directory: `probe-rs-tools/src/bin/probe-rs/cmd/gdb_server/` at that
+  commit, read from git (at this fork's base the folder holds upstream's RPC
+  rewrite of the GDB server, not this source)
 
-The engine files are extracted from that pinned upstream source (the source
-directory above is the fork's own pinned copy at the commit named above) with the
+The engine files are extracted from that pinned upstream source with the
 documented deltas below. They are not hand-maintained: fidelity is enforced
-deterministically by `tests/extraction_drift.rs` against a committed SHA-256
-baseline of the pinned contents. A full `cargo xtask probe-rs update` regenerator
+deterministically by `tests/extraction_drift.rs`, which reads the pinned source
+from git. A full `cargo xtask probe-rs update` regenerator
 that re-extracts this subtree from a fetched upstream revision is **planned future
 work and does not exist yet**; today extraction is *verified*, not regenerated.
 
@@ -46,20 +47,33 @@ checks.
    itself, so the only difference from upstream is the deletion; the explanation
    lives here.
 
+## Port to upstream `0da5ec5c5e3d43f66f8eb4cbf5e7106158110c7c`
+
+The fork's base moved from v0.32.0 to that upstream master commit. The crate is
+ported to the new core API with **no edits**: every file under `src/` is
+unchanged, and the extraction source stays the commit above. Two upstream changes
+sit under the crate without an edit: `DownloadOptions` gained `ram_chunk_size`
+(default off) and `preverify` now compares sectors (default off); the crate sets
+neither. Upstream GDB-server fixes made after the commit above no longer reach
+this crate. Port edits for a later base are listed here, each with the upstream
+API it follows.
+
 ## Re-verifying "no silent drift"
 
-`tests/extraction_drift.rs` is the authoritative, deterministic check. It hashes
-the in-fork pinned source and the extracted crate (newline-normalized) and
-compares both against the committed baseline in `tests/pinned_gdb_server.sha256`
-— reviewed SHA-256 values of the pinned upstream contents at the commit above,
-not a live diff of the two trees. It also re-derives the `desc/mod.rs` transform
-from the source and confirms it yields the committed extracted hash, and its
-negative tests prove that both an extracted-only edit and an identical edit made
-to *both* trees are caught. The two deltas above are the only expected
-differences; the same result is reproducible by hand (newline-normalized):
+`tests/extraction_drift.rs` is the authoritative, deterministic check. It reads
+the pinned source from git (`git ls-tree` and `git show` at the commit above, run
+in this repository), applies the two deltas above and compares the result with
+`src/gdb` file by file, newline-normalized: an unrecorded edit fails it. A clone
+without that commit fails the test with the fix in its message (a full clone, or
+`git fetch origin <commit>`); it never skips. A second check binds the whole
+ported crate: `PORTED_CRATE_SHA256` is a SHA-256 over every `src/**/*.rs`, each
+path relative to the crate root with `/` separators, so Windows and Linux agree.
+Its negative tests prove that an extracted-only edit, a crate edit and a source
+file the crate lacks are caught. The same result is reproducible by hand:
 
 ```bash
-UP=<fork>/probe-rs-tools/src/bin/probe-rs/cmd/gdb_server
+mkdir -p /tmp/pinned && git archive 48f5e4d53c690a1d40c2454033c6f785b4f4f95c probe-rs-tools/src/bin/probe-rs/cmd/gdb_server | tar -x -C /tmp/pinned
+UP=/tmp/pinned/probe-rs-tools/src/bin/probe-rs/cmd/gdb_server
 diff "$UP/stub.rs" src/gdb/stub.rs    # empty
 diff "$UP/arch.rs" src/gdb/arch.rs    # empty
 diff -r "$UP/target" src/gdb/target   # only: removed desc/test.rs, removed
@@ -91,11 +105,9 @@ crate-level warning suppression is used.
 - `tests/no_independent_attach.rs` — fails if any non-comment source line
   contains an enumerate/open/attach path (`simple_attach`, `.open(`, `.attach(`,
   `Lister`, …).
-- `tests/extraction_drift.rs` — deterministic drift verifier against the committed
-  SHA-256 baseline of the pinned source; fails if the in-fork source or the
-  extracted crate diverges from the pin beyond the two documented deltas, and
-  proves (via negative tests) that simultaneous source+copy edits are caught.
-- `tests/pinned_gdb_server.sha256` — the reviewed, committed baseline hashes.
+- `tests/extraction_drift.rs` — deterministic drift verifier against the pinned
+  source read from git; fails if the extracted crate diverges from the pin beyond
+  the two documented deltas or the ported crate differs from `PORTED_CRATE_SHA256`.
 
 ## Removal condition
 

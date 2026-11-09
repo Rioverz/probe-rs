@@ -29,8 +29,8 @@ itertools = "0.15"
 tracing = "0.1"
 
 [dev-dependencies]
-# extraction_drift.rs hashes the pinned source and extracted files against the
-# committed baseline in tests/pinned_gdb_server.sha256.
+# extraction_drift.rs compares the extracted files with the pinned source read
+# from git and hashes the ported crate.
 sha2 = "0.10"
 hex = "0.4"
 
