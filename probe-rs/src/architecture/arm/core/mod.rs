@@ -20,6 +20,7 @@ pub mod armv8m;
 pub(crate) mod armv7ar_debug_regs;
 pub(crate) mod armv8a_debug_regs;
 pub(crate) mod cortex_m;
+pub(crate) mod dwt_watchpoint;
 pub(crate) mod instructions;
 #[cfg(test)]
 pub(crate) mod mock;
