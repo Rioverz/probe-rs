@@ -3,6 +3,7 @@
 use super::{
     CortexMState, Dfsr,
     cortex_m::{Mvfr0, clear_step_before_reset, enable_halting_debug, exit_halt, set_vector_catch},
+    dwt_watchpoint::{self, watchpoint_registers},
     registers::cortex_m::{
         CORTEX_M_CORE_REGISTERS, CORTEX_M_WITH_FP_CORE_REGISTERS, FP, PC, RA, SP,
     },
@@ -15,7 +16,7 @@ use crate::{
     },
     core::{
         Architecture, CoreInformation, CoreInterface, CoreRegisters, CoreStatus, HaltReason,
-        MemoryMappedRegister, RegisterId, RegisterValue, VectorCatchCondition,
+        MemoryMappedRegister, RegisterId, RegisterValue, VectorCatchCondition, WatchpointAccess,
     },
     error::Error,
     memory::{CoreMemoryInterface, valid_32bit_address},
@@ -705,6 +706,19 @@ impl<'probe> Armv7m<'probe> {
 
         Ok(())
     }
+
+    /// Set DEMCR.TRCENA when clear: DWT reads are UNKNOWN and comparators idle without it
+    ///
+    /// It stays set after, a trace user may need it (ARMv7-M ARM C1.6.5)
+    fn enable_dwt(&mut self) -> Result<(), Error> {
+        let mut demcr = Demcr(self.memory.read_word_32(Demcr::get_mmio_address())?);
+        if !demcr.trcena() {
+            demcr.set_trcena(true);
+            self.memory
+                .write_word_32(Demcr::get_mmio_address(), demcr.into())?;
+        }
+        Ok(())
+    }
 }
 
 impl CoreInterface for Armv7m<'_> {
@@ -1108,6 +1122,31 @@ impl CoreInterface for Armv7m<'_> {
         Ok(())
     }
 
+    fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        self.enable_dwt()?;
+        dwt_watchpoint::units(&mut *self.memory)
+    }
+
+    fn hw_watchpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
+        let units = self.available_watchpoint_units()?;
+        dwt_watchpoint::in_use(&mut *self.memory, units)
+    }
+
+    fn set_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
+        self.enable_dwt()?;
+        dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
+    }
+
+    fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        dwt_watchpoint::clear(&mut *self.memory, unit_index)
+    }
+
     fn registers(&self) -> &'static CoreRegisters {
         if self.state.fp_present {
             &CORTEX_M_WITH_FP_CORE_REGISTERS
@@ -1221,4 +1260,255 @@ fn unsupported_breakpoint_address() {
     let address: u32 = 0x2000_0000;
 
     FpRev1CompX::breakpoint_configuration(address).unwrap_err();
+}
+
+#[cfg(test)]
+mod watchpoint_tests {
+    use super::*;
+    #[cfg(feature = "builtin-targets")]
+    use crate::{Core, config::Registry};
+    use crate::{
+        architecture::arm::core::mock::MockProbe, architecture::arm::sequences::DefaultArmSequence,
+        error::WatchpointError,
+    };
+
+    // Register addresses from ARMv7-M ARM (DDI 0403E.e) C1.6.5 and C1.8
+    const DEMCR: u64 = 0xE000_EDFC;
+    const TRCENA: u32 = 1 << 24;
+    const DWT_CTRL: u64 = 0xE000_1000;
+    const FOUR_COMPARATORS: u32 = 4 << 28;
+    #[cfg(feature = "builtin-targets")]
+    const TWO_COMPARATORS: u32 = 2 << 28;
+    const MASK_WORD: u32 = 2;
+    const TRACE_DATA_VALUE: u32 = 0b0011;
+    // MATCHED (bit 24) set with FUNCTION[3:0] disabled
+    const MATCHED_ONLY: u32 = 1 << 24;
+    const ADDRESS: u32 = 0x2000_0100;
+
+    fn comp(unit: u64) -> u64 {
+        0xE000_1020 + 16 * unit
+    }
+
+    fn mask(unit: u64) -> u64 {
+        comp(unit) + 4
+    }
+
+    fn function(unit: u64) -> u64 {
+        comp(unit) + 8
+    }
+
+    fn armv7m(probe: MockProbe, state: &mut CortexMState) -> Armv7m<'_> {
+        state.initialize();
+        Armv7m::new(Box::new(probe), state, DefaultArmSequence::create()).unwrap()
+    }
+
+    // With TRCENA set DEMCR is read and left as it is
+    fn expect_trcena_set(probe: &mut MockProbe) {
+        probe.expected_read(DEMCR, TRCENA);
+    }
+
+    // Reads of the unit list, COMP only for a unit in use
+    fn expect_units(probe: &mut MockProbe, ctrl: u32, units: &[(u32, u32)]) {
+        expect_trcena_set(probe);
+        probe.expected_read(DWT_CTRL, ctrl);
+        for (unit, &(function_value, comp_value)) in units.iter().enumerate() {
+            probe.expected_read(function(unit as u64), function_value);
+            if function_value & 0b1111 != 0 {
+                probe.expected_read(comp(unit as u64), comp_value);
+            }
+        }
+    }
+
+    fn expect_set(probe: &mut MockProbe, unit: u64, address: u32, function_value: u32) {
+        probe.expected_write(function(unit), 0);
+        probe.expected_write(comp(unit), address);
+        probe.expected_write(mask(unit), MASK_WORD);
+        probe.expected_write(function(unit), function_value);
+    }
+
+    #[test]
+    fn watchpoint_count_is_numcomp_with_trcena_set() {
+        let mut probe = MockProbe::new(0);
+        expect_trcena_set(&mut probe);
+        probe.expected_read(DWT_CTRL, FOUR_COMPARATORS);
+        let mut state = CortexMState::new();
+
+        assert_eq!(
+            armv7m(probe, &mut state)
+                .available_watchpoint_units()
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn watchpoint_count_sets_trcena_first_when_clear() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(DEMCR, 0);
+        probe.expected_write(DEMCR, TRCENA);
+        probe.expected_read(DWT_CTRL, FOUR_COMPARATORS);
+        let mut state = CortexMState::new();
+
+        assert_eq!(
+            armv7m(probe, &mut state)
+                .available_watchpoint_units()
+                .unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn watchpoint_set_writes_function_0_comp_mask_then_the_access_code() {
+        let accesses = [
+            (WatchpointAccess::Read, 0b0101),
+            (WatchpointAccess::Write, 0b0110),
+            (WatchpointAccess::ReadWrite, 0b0111),
+        ];
+        for (access, code) in accesses {
+            // With TRCENA clear DEMCR is written with it first
+            let mut probe = MockProbe::new(0);
+            probe.expected_read(DEMCR, 0);
+            probe.expected_write(DEMCR, TRCENA);
+            expect_set(&mut probe, 2, ADDRESS, code);
+            let mut state = CortexMState::new();
+            armv7m(probe, &mut state)
+                .set_hw_watchpoint(2, ADDRESS.into(), access)
+                .unwrap();
+
+            // With TRCENA set DEMCR is only read
+            let mut probe = MockProbe::new(0);
+            expect_trcena_set(&mut probe);
+            expect_set(&mut probe, 3, ADDRESS, code);
+            let mut state = CortexMState::new();
+            armv7m(probe, &mut state)
+                .set_hw_watchpoint(3, ADDRESS.into(), access)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn watchpoint_clear_writes_function_0() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_write(function(3), 0);
+        let mut state = CortexMState::new();
+
+        armv7m(probe, &mut state).clear_hw_watchpoint(3).unwrap();
+    }
+
+    #[test]
+    fn watchpoint_unit_is_in_use_by_function_bits_3_to_0() {
+        let mut probe = MockProbe::new(0);
+        expect_units(
+            &mut probe,
+            FOUR_COMPARATORS,
+            &[
+                (TRACE_DATA_VALUE, ADDRESS),
+                (0, 0),
+                (MATCHED_ONLY, 0),
+                (0b0110, 0x2000_0200),
+            ],
+        );
+        let mut state = CortexMState::new();
+
+        assert_eq!(
+            armv7m(probe, &mut state).hw_watchpoints().unwrap(),
+            vec![Some(ADDRESS.into()), None, None, Some(0x2000_0200)]
+        );
+    }
+
+    #[test]
+    fn watchpoint_unaligned_is_refused_before_any_register_access() {
+        let probe = MockProbe::new(0);
+        let mut state = CortexMState::new();
+
+        let refused = armv7m(probe, &mut state)
+            .set_hw_watchpoint(0, 0x2000_0102, WatchpointAccess::Write)
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            Error::WatchpointOperation(WatchpointError::NotWordAligned(0x2000_0102))
+        ));
+    }
+
+    #[test]
+    fn watchpoint_all_four_units_in_use_are_reported() {
+        let mut probe = MockProbe::new(0);
+        let units = [
+            (0b0101, 0x2000_0000),
+            (0b0110, 0x2000_0004),
+            (0b0111, 0x2000_0008),
+            (TRACE_DATA_VALUE, 0x2000_000C),
+        ];
+        expect_units(&mut probe, FOUR_COMPARATORS, &units);
+        let mut state = CortexMState::new();
+
+        let watchpoints = armv7m(probe, &mut state).hw_watchpoints().unwrap();
+        assert_eq!(watchpoints.len(), 4);
+        assert!(watchpoints.iter().all(Option::is_some));
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    fn h743() -> crate::Target {
+        Registry::from_builtin_families()
+            .get_target_by_name("STM32H743VI")
+            .unwrap()
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_fifth_address_through_core_has_no_free_unit() {
+        let mut probe = MockProbe::new(0);
+        let units = [
+            (0b0101, 0x2000_0000),
+            (0b0110, 0x2000_0004),
+            (0b0111, 0x2000_0008),
+            (TRACE_DATA_VALUE, 0x2000_000C),
+        ];
+        expect_units(&mut probe, FOUR_COMPARATORS, &units);
+        let mut state = CortexMState::new();
+        let target = h743();
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        let refused = core
+            .set_hw_watchpoint(ADDRESS.into(), WatchpointAccess::Write)
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            Error::WatchpointOperation(WatchpointError::NoFreeUnit)
+        ));
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_on_a_watched_address_through_core_reuses_its_unit() {
+        let mut probe = MockProbe::new(0);
+        expect_units(&mut probe, TWO_COMPARATORS, &[(0, 0), (0b0110, ADDRESS)]);
+        expect_trcena_set(&mut probe);
+        expect_set(&mut probe, 1, ADDRESS, 0b0111);
+        let mut state = CortexMState::new();
+        let target = h743();
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        core.set_hw_watchpoint(ADDRESS.into(), WatchpointAccess::ReadWrite)
+            .unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_clear_all_through_core_clears_a_trace_unit_too() {
+        let mut probe = MockProbe::new(0);
+        let trace = (TRACE_DATA_VALUE, 0x2000_0000);
+        let watch = (0b0101, 0x2000_0004);
+        // The list, then per address the list again and its FUNCTION 0
+        expect_units(&mut probe, TWO_COMPARATORS, &[trace, watch]);
+        expect_units(&mut probe, TWO_COMPARATORS, &[trace, watch]);
+        probe.expected_write(function(0), 0);
+        expect_units(&mut probe, TWO_COMPARATORS, &[(0, 0), watch]);
+        probe.expected_write(function(1), 0);
+        let mut state = CortexMState::new();
+        let target = h743();
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        core.clear_all_hw_watchpoints().unwrap();
+    }
 }

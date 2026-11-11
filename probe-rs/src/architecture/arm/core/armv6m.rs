@@ -3,6 +3,7 @@
 use super::{
     CortexMState, Dfsr,
     cortex_m::{clear_step_before_reset, enable_halting_debug, exit_halt, set_vector_catch},
+    dwt_watchpoint::{self, watchpoint_registers},
     registers::cortex_m::*,
 };
 use crate::{
@@ -10,7 +11,7 @@ use crate::{
     CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
     architecture::arm::{ArmError, memory::ArmMemoryInterface, sequences::ArmDebugSequence},
     core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition, WatchpointAccess},
-    error::{Error, WatchpointError},
+    error::Error,
     memory::{CoreMemoryInterface, valid_32bit_address},
 };
 use bitfield::bitfield;
@@ -19,6 +20,11 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use super::dwt_watchpoint::{DWT_FUNCTION_OFFSET, dwt_comparator};
+#[cfg(test)]
+use crate::error::WatchpointError;
 
 bitfield! {
     /// Debug Halting Control and Status Register, DHCSR (see armv6-M Architecture Reference Manual C1.6.3)
@@ -407,40 +413,6 @@ impl From<Demcr> for u32 {
 impl MemoryMappedRegister<u32> for Demcr {
     const ADDRESS_OFFSET: u64 = 0xe000_edfc;
     const NAME: &'static str = "DEMCR";
-}
-
-// The DWT data watchpoints (ARMv6-M Architecture Reference Manual C1.8; values as libopencm3's
-// `dwt.h` gives them for ARMv6-M, until a bench run on a Cortex-M0 confirms them).
-/// DWT_CTRL; `NUMCOMP`, the number of comparators, is bits [31:28].
-const DWT_CTRL: u64 = 0xE000_1000;
-/// DWT_COMP0; each comparator's COMP, MASK and FUNCTION registers follow at +0, +4 and +8,
-/// and comparator `n` is `DWT_COMPARATOR_STRIDE * n` further on.
-const DWT_COMP0: u64 = 0xE000_1020;
-const DWT_COMPARATOR_STRIDE: u64 = 0x10;
-const DWT_MASK_OFFSET: u64 = 0x4;
-const DWT_FUNCTION_OFFSET: u64 = 0x8;
-/// MASK: the number of low address bits the comparison ignores; 2 watches one aligned word.
-const DWT_MASK_WORD: u32 = 2;
-/// FUNCTION[3:0] for a disabled comparator.
-const DWT_FUNCTION_DISABLED: u32 = 0b0000;
-const DWT_FUNCTION_MASK: u32 = 0b1111;
-
-/// The COMP, MASK and FUNCTION values of a watchpoint on the word at `address`.
-fn watchpoint_registers(address: u32, access: WatchpointAccess) -> Result<(u32, u32, u32), Error> {
-    if !address.is_multiple_of(4) {
-        return Err(WatchpointError::NotWordAligned(address.into()).into());
-    }
-    let function = match access {
-        WatchpointAccess::Read => 0b0101,
-        WatchpointAccess::Write => 0b0110,
-        WatchpointAccess::ReadWrite => 0b0111,
-    };
-    Ok((address, DWT_MASK_WORD, function))
-}
-
-/// The address of comparator `unit`'s COMP register.
-fn dwt_comparator(unit: usize) -> u64 {
-    DWT_COMP0 + DWT_COMPARATOR_STRIDE * unit as u64
 }
 
 /// The state of a core that can be used to persist core state across calls to multiple different cores.
@@ -891,22 +863,12 @@ impl CoreInterface for Armv6m<'_> {
     }
 
     fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
-        Ok(self.memory.read_word_32(DWT_CTRL)? >> 28)
+        dwt_watchpoint::units(&mut *self.memory)
     }
 
     fn hw_watchpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
-        let units = self.available_watchpoint_units()? as usize;
-        let mut watchpoints = Vec::with_capacity(units);
-        for unit in 0..units {
-            let comparator = dwt_comparator(unit);
-            let function = self.memory.read_word_32(comparator + DWT_FUNCTION_OFFSET)?;
-            if function & DWT_FUNCTION_MASK == DWT_FUNCTION_DISABLED {
-                watchpoints.push(None);
-            } else {
-                watchpoints.push(Some(self.memory.read_word_32(comparator)?.into()));
-            }
-        }
-        Ok(watchpoints)
+        let units = self.available_watchpoint_units()?;
+        dwt_watchpoint::in_use(&mut *self.memory, units)
     }
 
     fn set_hw_watchpoint(
@@ -915,7 +877,7 @@ impl CoreInterface for Armv6m<'_> {
         addr: u64,
         access: WatchpointAccess,
     ) -> Result<(), Error> {
-        let (comp, mask, function) = watchpoint_registers(valid_32bit_address(addr)?, access)?;
+        let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
 
         // The comparators act only while the DWT is enabled. It stays enabled after the
         // watchpoint is cleared: a trace user may need it, and a disabled comparator does nothing.
@@ -926,26 +888,11 @@ impl CoreInterface for Armv6m<'_> {
                 .write_word_32(Demcr::get_mmio_address(), demcr.into())?;
         }
 
-        let comparator = dwt_comparator(unit_index);
-        // Disabled first, so the comparator never matches with half its new settings.
-        self.memory
-            .write_word_32(comparator + DWT_FUNCTION_OFFSET, DWT_FUNCTION_DISABLED)?;
-        self.memory.write_word_32(comparator, comp)?;
-        self.memory
-            .write_word_32(comparator + DWT_MASK_OFFSET, mask)?;
-        self.memory
-            .write_word_32(comparator + DWT_FUNCTION_OFFSET, function)?;
-        self.memory.flush()?;
-        Ok(())
+        dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
     }
 
     fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
-        self.memory.write_word_32(
-            dwt_comparator(unit_index) + DWT_FUNCTION_OFFSET,
-            DWT_FUNCTION_DISABLED,
-        )?;
-        self.memory.flush()?;
-        Ok(())
+        dwt_watchpoint::clear(&mut *self.memory, unit_index)
     }
 
     fn registers(&self) -> &'static CoreRegisters {

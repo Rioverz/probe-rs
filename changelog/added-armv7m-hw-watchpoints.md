@@ -1,0 +1,1 @@
+Added hardware data watchpoints on ARMv7-M cores (Cortex-M3, M4, M7) through the same API as ARMv6-M. Reading the comparator count or setting a watchpoint sets DEMCR.TRCENA first, and it stays set. A dropped session now also clears the ARMv7-M comparators in use, including ones a trace setup programmed.
