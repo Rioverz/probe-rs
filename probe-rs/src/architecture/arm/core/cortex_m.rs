@@ -1,5 +1,6 @@
 //! Common functions and data types for Cortex-M core variants
 
+use super::Dfsr;
 use crate::memory::{Operation, OperationKind};
 use crate::{
     CoreInterface, Error, MemoryMappedRegister,
@@ -214,7 +215,7 @@ pub(crate) fn write_core_reg(
 /// Leave Debug state, either running freely or stepping one instruction.
 ///
 /// A single DHCSR write cannot clear C_HALT and change C_MASKINTS, so C_MASKINTS is settled in
-/// its own write first. See ARM DDI 0419E C1.6.3, DDI 0403E.e C1.6.3 and DDI 0553B.v D1.2.38.
+/// its own write first. See ARM DDI 0419E C1.6.3, DDI 0403E.e C1.6.2 and DDI 0553B.v D1.2.38
 pub(crate) fn exit_halt(memory: &mut dyn ArmMemoryInterface, step: bool) -> Result<(), ArmError> {
     let mut dhcsr = Dhcsr(memory.read_word_32(Dhcsr::get_mmio_address())?);
 
@@ -231,41 +232,50 @@ pub(crate) fn exit_halt(memory: &mut dyn ArmMemoryInterface, step: bool) -> Resu
     }
 
     dhcsr.set_c_step(step);
-    dhcsr.set_c_halt(false);
     dhcsr.set_c_debugen(true);
+    release_halt(memory, dhcsr)
+}
+
+/// Write DHCSR with C_HALT 0, clearing DFSR just before it
+fn release_halt(memory: &mut dyn ArmMemoryInterface, mut dhcsr: Dhcsr) -> Result<(), ArmError> {
+    dhcsr.set_c_halt(false);
     dhcsr.enable_write();
+    clear_dfsr(memory)?;
     memory.write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
     memory.flush()
+}
+
+/// Clear every DFSR bit (write one to clear)
+pub(crate) fn clear_dfsr(memory: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
+    memory.write_word_32(Dfsr::get_mmio_address(), Dfsr::clear_all().into())
 }
 
 /// Clear C_STEP and C_MASKINTS left by a step since a system reset does not clear DHCSR.
 ///
 /// C_HALT is set in the write that changes C_MASKINTS as exit_halt does.
 /// When halt is false and the core was running a second write clears C_HALT again.
+/// DFSR survives a local reset (DDI 0403E.e C1.6.1): clear it last
 pub(crate) fn clear_step_before_reset(
     memory: &mut dyn ArmMemoryInterface,
     halt: bool,
 ) -> Result<(), ArmError> {
     let mut dhcsr = Dhcsr(memory.read_word_32(Dhcsr::get_mmio_address())?);
-    if !dhcsr.c_step() && !dhcsr.c_maskints() {
-        return Ok(());
-    }
-    let was_halted = dhcsr.c_halt();
+    if dhcsr.c_step() || dhcsr.c_maskints() {
+        let was_halted = dhcsr.c_halt();
 
-    dhcsr.set_c_step(false);
-    dhcsr.set_c_maskints(false);
-    dhcsr.set_c_halt(true);
-    dhcsr.enable_write();
-    memory.write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
-    memory.flush()?;
-
-    if !halt && !was_halted {
-        dhcsr.set_c_halt(false);
+        dhcsr.set_c_step(false);
+        dhcsr.set_c_maskints(false);
+        dhcsr.set_c_halt(true);
         dhcsr.enable_write();
         memory.write_word_32(Dhcsr::get_mmio_address(), dhcsr.into())?;
         memory.flush()?;
+
+        if !halt && !was_halted {
+            release_halt(memory, dhcsr)?;
+        }
     }
-    Ok(())
+    clear_dfsr(memory)?;
+    memory.flush()
 }
 
 /// Set DHCSR.C_DEBUGEN, keeping the debug key so the write is not ignored.
@@ -390,6 +400,194 @@ fn wait_for_core_register_transfer(
 #[cfg(test)]
 mod tests {
     use super::is_bkpt_instruction;
+
+    use super::{clear_step_before_reset, exit_halt};
+    use crate::CoreType;
+    use crate::architecture::arm::ArmError;
+    use crate::architecture::arm::core::mock::MockProbe;
+    use crate::architecture::arm::memory::ArmMemoryInterface;
+    use crate::architecture::arm::sequences::DefaultArmSequence;
+
+    // Register addresses: DDI 0403E.e C1.6.2 (DHCSR) and C1.6.1 (DFSR)
+    const DHCSR: u64 = 0xE000_EDF0;
+    const DFSR: u64 = 0xE000_ED30;
+    const DEMCR: u64 = 0xE000_EDFC;
+    const KEY: u32 = 0xA05F << 16;
+    const C_DEBUGEN: u32 = 1 << 0;
+    const C_HALT: u32 = 1 << 1;
+    const C_STEP: u32 = 1 << 2;
+    const C_MASKINTS: u32 = 1 << 3;
+    const S_HALT: u32 = 1 << 17;
+    const DFSR_ALL: u32 = 0b1_1111;
+
+    #[derive(Debug, Clone, Copy)]
+    enum Op {
+        Read(u64, u32),
+        Write(u64, u32),
+    }
+
+    /// Run a call on a mock that allows exactly these operations
+    fn recorded(
+        ops: &[Op],
+        call: impl FnOnce(&mut dyn ArmMemoryInterface) -> Result<(), ArmError>,
+    ) {
+        let mut probe = MockProbe::new(0);
+        for op in ops {
+            match *op {
+                Op::Read(address, value) => probe.expected_read(address, value),
+                Op::Write(address, value) => probe.expected_write(address, value),
+            }
+        }
+        call(&mut probe).unwrap();
+    }
+
+    /// The release rule over an operation list
+    ///
+    /// DFSR starts as maybe set; a C_HALT=1 write makes it so again and
+    /// may not come after the clear; only a write of all five bits
+    /// clears it; a C_HALT=0 write needs it clear
+    fn check_release_rule(ops: &[Op], ends_clear: bool) -> Result<(), String> {
+        let mut clear = false;
+        for (at, op) in ops.iter().enumerate() {
+            match *op {
+                Op::Write(DFSR, DFSR_ALL) => clear = true,
+                Op::Write(DFSR, value) => return Err(format!("op {at}: DFSR write {value:#x}")),
+                Op::Write(DHCSR, value) if value & C_HALT != 0 => {
+                    if clear {
+                        return Err(format!("op {at}: C_HALT=1 write after the clear"));
+                    }
+                }
+                Op::Write(DHCSR, _) => {
+                    if !clear {
+                        return Err(format!("op {at}: release with DFSR maybe set"));
+                    }
+                    clear = false;
+                }
+                _ => {}
+            }
+        }
+        if ends_clear && !clear {
+            return Err("DFSR maybe set at the end".to_owned());
+        }
+        Ok(())
+    }
+
+    /// What exit_halt must do from a halted core
+    fn exit_halt_ops(step: bool, maskints: bool) -> Vec<Op> {
+        let masked = if maskints { C_MASKINTS } else { 0 };
+        let mut ops = vec![Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN | masked)];
+        let wanted = if step { C_MASKINTS } else { 0 };
+        if maskints != step {
+            ops.push(Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN | wanted));
+        }
+        let stepping = if step { C_STEP } else { 0 };
+        ops.push(Op::Write(DFSR, DFSR_ALL));
+        ops.push(Op::Write(DHCSR, KEY | C_DEBUGEN | wanted | stepping));
+        ops
+    }
+
+    #[test]
+    fn exit_halt_clears_dfsr_directly_before_the_release() {
+        for step in [false, true] {
+            for maskints in [false, true] {
+                let ops = exit_halt_ops(step, maskints);
+                recorded(&ops, |memory| exit_halt(memory, step));
+                assert_eq!(
+                    check_release_rule(&ops, false),
+                    Ok(()),
+                    "step {step} maskints {maskints}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_step_before_reset_leaves_dfsr_clear_on_every_path() {
+        let stepped = C_DEBUGEN | C_STEP | C_MASKINTS;
+        let halt_write = Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN);
+        let clear = Op::Write(DFSR, DFSR_ALL);
+        let paths = [
+            (
+                "neither bit",
+                true,
+                vec![Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN), clear],
+            ),
+            (
+                "halt true",
+                true,
+                vec![Op::Read(DHCSR, stepped), halt_write, clear],
+            ),
+            (
+                "halt false, halted",
+                false,
+                vec![
+                    Op::Read(DHCSR, S_HALT | C_HALT | stepped),
+                    halt_write,
+                    clear,
+                ],
+            ),
+            (
+                "halt false, running",
+                false,
+                vec![
+                    Op::Read(DHCSR, stepped),
+                    halt_write,
+                    clear,
+                    Op::Write(DHCSR, KEY | C_DEBUGEN),
+                    clear,
+                ],
+            ),
+        ];
+        for (path, halt, ops) in paths {
+            recorded(&ops, |memory| clear_step_before_reset(memory, halt));
+            assert_eq!(check_release_rule(&ops, true), Ok(()), "{path}");
+        }
+    }
+
+    #[test]
+    fn debug_core_stop_clears_dfsr_directly_before_the_dhcsr_write() {
+        let ops = [
+            Op::Write(DFSR, DFSR_ALL),
+            Op::Write(DHCSR, KEY),
+            Op::Write(DEMCR, 0),
+        ];
+        let sequence = DefaultArmSequence::create();
+        recorded(&ops, |memory| {
+            sequence.debug_core_stop(memory, CoreType::Armv7m)
+        });
+        assert_eq!(check_release_rule(&ops, false), Ok(()));
+    }
+
+    #[test]
+    fn the_release_rule_fails_a_release_without_a_clear() {
+        // exit_halt at 21198f15c with a C_MASKINTS change
+        let ops = [
+            Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN),
+            Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN | C_MASKINTS),
+            Op::Write(DHCSR, KEY | C_DEBUGEN | C_MASKINTS | C_STEP),
+        ];
+        assert!(check_release_rule(&ops, false).is_err());
+    }
+
+    #[test]
+    fn the_release_rule_fails_a_halt_write_between_the_clear_and_the_release() {
+        let ops = [
+            Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN),
+            Op::Write(DFSR, DFSR_ALL),
+            Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN | C_MASKINTS),
+            Op::Write(DHCSR, KEY | C_DEBUGEN | C_MASKINTS | C_STEP),
+        ];
+        assert!(check_release_rule(&ops, false).is_err());
+    }
+
+    #[test]
+    fn the_release_rule_fails_a_clear_of_fewer_bits_and_an_end_maybe_set() {
+        let partial = [Op::Write(DFSR, 0b0_1111), Op::Write(DHCSR, KEY | C_DEBUGEN)];
+        assert!(check_release_rule(&partial, false).is_err());
+        let released = [Op::Write(DFSR, DFSR_ALL), Op::Write(DHCSR, KEY | C_DEBUGEN)];
+        assert_eq!(check_release_rule(&released, false), Ok(()));
+        assert!(check_release_rule(&released, true).is_err());
+    }
 
     #[test]
     fn is_bkpt_instruction_tells_bkpt_from_branch_to_self() {
