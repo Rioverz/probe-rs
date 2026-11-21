@@ -5,6 +5,7 @@ mod commands;
 mod tcp;
 mod tools;
 
+pub use commands::DEFAULT_USB_TIMEOUT;
 pub use commands::VendorCommandId;
 
 use crate::{

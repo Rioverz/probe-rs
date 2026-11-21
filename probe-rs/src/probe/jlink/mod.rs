@@ -51,7 +51,8 @@ use crate::{
 };
 
 const SWO_BUFFER_SIZE: u16 = 128;
-const TIMEOUT_DEFAULT: Duration = Duration::from_millis(500);
+/// USB timeout of a J-Link transfer
+pub const TIMEOUT_DEFAULT: Duration = Duration::from_millis(500);
 
 /// Times the first command of a session is sent while the probe refuses it. Covers a command an
 /// earlier host left running.

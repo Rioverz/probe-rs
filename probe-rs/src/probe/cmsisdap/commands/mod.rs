@@ -23,7 +23,8 @@ use self::general::host_status::HostStatusRequest;
 use self::swj::clock::SWJClockRequest;
 use self::transfer::TransferAbortRequest;
 
-pub(crate) const DEFAULT_USB_TIMEOUT: Duration = Duration::from_millis(1000);
+/// USB timeout of a CMSIS-DAP transfer
+pub const DEFAULT_USB_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Rounds spent bringing replies back into step before giving up on the probe.
 const MAX_RESYNC_ROUNDS: usize = 32;

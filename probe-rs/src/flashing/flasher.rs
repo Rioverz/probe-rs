@@ -21,6 +21,15 @@ use std::{
 /// The timeout for init/uninit routines.
 const INIT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Timeout of the flash algorithm read routine
+pub const READ_FLASH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout of the flash algorithm verify routine
+pub const VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Timeout of the flash algorithm blank check routine
+pub const BLANK_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
 // TODO: needs to be sealed
 /// Represents the operation for which the flash loader is initialized.
 pub trait Operation {
@@ -1132,7 +1141,7 @@ impl<'op, 'p, O: Operation> ActiveFlasher<'op, 'p, O> {
                             r3: None,
                         },
                         false,
-                        Duration::from_secs(30),
+                        READ_FLASH_TIMEOUT,
                     )
                     .map_err(|error| FlashError::FlashReadFailed {
                         source: Box::new(error),
@@ -1250,10 +1259,8 @@ impl<'op, 'p, O: Operation> ActiveFlasher<'op, 'p, O> {
                     r3: None,
                 },
                 false,
-                Duration::from_millis(
-                    // self.flash_algorithm.flash_properties.erase_sector_timeout as u64,
-                    10_000,
-                ),
+                // self.flash_algorithm.flash_properties.erase_sector_timeout as u64,
+                BLANK_CHECK_TIMEOUT,
             )?;
             tracing::info!(
                 "Done checking blank. Result is {}. This took {:?}",
@@ -1305,7 +1312,7 @@ impl ActiveFlasher<'_, '_, Verify> {
                 r3: None,
             },
             false,
-            Duration::from_secs(10),
+            BLANK_CHECK_TIMEOUT,
         )?;
 
         Ok(result == 0)
@@ -1349,7 +1356,7 @@ impl ActiveFlasher<'_, '_, Verify> {
                 r3: None,
             },
             false,
-            Duration::from_secs(30),
+            VERIFY_TIMEOUT,
         )?;
 
         // Returns
