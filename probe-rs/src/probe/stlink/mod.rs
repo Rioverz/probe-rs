@@ -34,6 +34,8 @@ use std::{cmp::Ordering, sync::Arc, time::Duration};
 use constants::{JTagFrequencyToDivider, Mode, Status, SwdFrequencyToDelayCount, commands};
 use usb_interface::{StLinkUsb, StLinkUsbDevice, TIMEOUT};
 
+pub use usb_interface::TIMEOUT as USB_TIMEOUT;
+
 /// Maximum length of 32 bit reads in bytes.
 ///
 /// Length has been determined by experimenting with
@@ -1880,9 +1882,15 @@ fn is_wait_error(e: &StlinkError) -> bool {
     )
 }
 
+/// Attempts of a transfer the probe answers with WAIT
+pub const WAIT_RETRY_ATTEMPTS: u32 = 13;
+
+/// Sleep after the first WAIT then doubled after each later one
+pub const WAIT_RETRY_FIRST_BACKOFF: Duration = Duration::from_micros(100);
+
 fn retry_on_wait<R>(mut f: impl FnMut() -> Result<R, StlinkError>) -> Result<R, StlinkError> {
     let mut last_err = None;
-    for attempt in 0..13 {
+    for attempt in 0..WAIT_RETRY_ATTEMPTS {
         match f() {
             Ok(res) => return Ok(res),
             Err(e) => {
@@ -1896,7 +1904,7 @@ fn retry_on_wait<R>(mut f: impl FnMut() -> Result<R, StlinkError>) -> Result<R, 
         }
 
         // Sleep with exponential backoff.
-        thread::sleep(Duration::from_micros(100 << attempt));
+        thread::sleep(WAIT_RETRY_FIRST_BACKOFF * (1 << attempt));
     }
 
     tracing::warn!("too many retries, giving up");
@@ -2089,5 +2097,38 @@ mod test {
         assert!(is_wait_error(&StlinkError::CommandFailed(
             Status::SwdApWait
         )));
+    }
+
+    #[test]
+    fn a_wait_on_every_attempt_retries_the_attempt_count_then_fails() {
+        let mut calls = 0;
+        let start = std::time::Instant::now();
+        let result: Result<(), StlinkError> = retry_on_wait(|| {
+            calls += 1;
+            Err(StlinkError::CommandFailed(Status::SwdDpWait))
+        });
+        let elapsed = start.elapsed();
+        assert_eq!(calls, WAIT_RETRY_ATTEMPTS);
+        // Every attempt sleeps and each sleep doubles the one before
+        assert!(elapsed >= WAIT_RETRY_FIRST_BACKOFF * ((1 << WAIT_RETRY_ATTEMPTS) - 1));
+        assert!(matches!(
+            result,
+            Err(StlinkError::CommandFailed(Status::SwdDpWait))
+        ));
+    }
+
+    #[test]
+    fn a_wait_then_ok_calls_twice_and_returns_the_ok() {
+        let mut calls = 0;
+        let result = retry_on_wait(|| {
+            calls += 1;
+            if calls == 1 {
+                Err(StlinkError::CommandFailed(Status::SwdApWait))
+            } else {
+                Ok(7)
+            }
+        });
+        assert_eq!(calls, 2);
+        assert!(matches!(result, Ok(7)));
     }
 }

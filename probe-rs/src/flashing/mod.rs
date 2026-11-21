@@ -68,7 +68,8 @@ pub use erase::*;
 pub use error::*;
 pub use flash_algorithm::*;
 pub use flasher::{
-    ActiveFlasher, Erase, FlashData, Flasher, LoadedRegion, Operation, Program, Verify,
+    ActiveFlasher, BLANK_CHECK_TIMEOUT, Erase, FlashData, Flasher, LoadedRegion, Operation,
+    Program, READ_FLASH_TIMEOUT, VERIFY_TIMEOUT, Verify,
 };
 pub use host_flasher::HostSideFlasher;
 pub use host_sequence::DebugFlashSequence;

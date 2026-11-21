@@ -20,6 +20,7 @@ const CMD_LEN: usize = 16;
 /// The USB VendorID.
 pub const USB_VID: u16 = 0x0483;
 
+/// USB timeout of an ST-Link transfer
 pub const TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Map of USB PID to firmware version name and device endpoints.
