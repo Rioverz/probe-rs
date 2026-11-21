@@ -7,32 +7,16 @@ license.workspace = true
 repository.workspace = true
 documentation.workspace = true
 homepage.workspace = true
-description = "The probe-rs GDB server exposed as a library that serves RSP against a caller-owned, borrowed Session. Engine files are extracted from the pinned probe-rs GDB source with the documented library-exposure and test-module deltas; see EXTRACTION.md."
+description = "The probe-rs GDB target description and memory map as a library. The code comes from the probe-rs GDB server with the deltas listed in EXTRACTION.md."
 publish = false
 
 [dependencies]
-# The fork's own patched core crate. The GDB server only borrows its Session;
-# builtin-formats provides the flashing types the GDB flash-load path borrows.
+# The fork core crate with no probe-rs feature
 # Kept as a direct path dep (not `workspace = true`): the workspace `probe-rs`
 # dependency uses default features, and Cargo forbids overriding `default-features`
 # on an inherited dependency, so the required `default-features = false` selection
 # can only be expressed directly.
-probe-rs = { path = "../probe-rs", default-features = false, features = ["builtin-formats"] }
-anyhow.workspace = true
-
-# Matched to probe-rs-tools @ 48f5e4d53c690a1d40c2454033c6f785b4f4f95c (the GDB
-# stub's own dependencies). Upstream declares these as plain version deps, not
-# workspace deps, so they stay literal here as the fork-specific GDB selection.
-gdbstub = "=0.7.8"
-parking_lot = "0.12.2"
-itertools = "0.15"
-tracing = "0.1"
-
-[dev-dependencies]
-# extraction_drift.rs compares the extracted files with the pinned source read
-# from git and hashes the ported crate.
-sha2 = "0.10"
-hex = "0.4"
+probe-rs = { path = "../probe-rs", default-features = false }
 
 [lints]
 workspace = true
