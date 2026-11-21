@@ -1,0 +1,1 @@
+Downstream fork change: the `probe-rs-gdb` crate no longer holds a GDB server. Its extracted RSP engine and the `run` and `GdbInstanceConfiguration` exports are removed, and the crate now depends on `probe-rs` alone.
