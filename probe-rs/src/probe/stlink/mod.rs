@@ -1880,7 +1880,7 @@ fn is_wait_error(e: &StlinkError) -> bool {
 /// Attempts of a transfer the probe answers with WAIT
 pub const WAIT_RETRY_ATTEMPTS: u32 = 13;
 
-/// Sleep after the first WAIT then doubled after each later one
+/// Sleep after the first WAIT then doubled after each later one, none after the last
 pub const WAIT_RETRY_FIRST_BACKOFF: Duration = Duration::from_micros(100);
 
 fn retry_on_wait<R>(mut f: impl FnMut() -> Result<R, StlinkError>) -> Result<R, StlinkError> {
@@ -1898,8 +1898,10 @@ fn retry_on_wait<R>(mut f: impl FnMut() -> Result<R, StlinkError>) -> Result<R, 
             }
         }
 
-        // Sleep with exponential backoff.
-        thread::sleep(WAIT_RETRY_FIRST_BACKOFF * (1 << attempt));
+        // No sleep after last attempt, nothing waits on it
+        if attempt + 1 < WAIT_RETRY_ATTEMPTS {
+            thread::sleep(WAIT_RETRY_FIRST_BACKOFF * (1 << attempt));
+        }
     }
 
     tracing::warn!("too many retries, giving up");
@@ -2104,8 +2106,9 @@ mod test {
         });
         let elapsed = start.elapsed();
         assert_eq!(calls, WAIT_RETRY_ATTEMPTS);
-        // Every attempt sleeps and each sleep doubles the one before
-        assert!(elapsed >= WAIT_RETRY_FIRST_BACKOFF * ((1 << WAIT_RETRY_ATTEMPTS) - 1));
+        // Sleeps only between attempts, each double the one before
+        assert!(elapsed >= WAIT_RETRY_FIRST_BACKOFF * ((1 << (WAIT_RETRY_ATTEMPTS - 1)) - 1));
+        assert!(elapsed < WAIT_RETRY_FIRST_BACKOFF * ((1 << WAIT_RETRY_ATTEMPTS) - 1));
         assert!(matches!(
             result,
             Err(StlinkError::CommandFailed(Status::SwdDpWait))

@@ -138,8 +138,8 @@ impl StLinkUsbDevice {
 
         let mut buf = [0; 512];
         let mut drained = 0;
+        refuse_if_pending(self.ep_in.pending(), self.ep_in.endpoint_address())?;
         while drained < MAX_DRAIN {
-            refuse_if_pending(self.ep_in.pending(), self.ep_in.endpoint_address())?;
             match self.ep_in.read_bulk(&mut buf, QUIET) {
                 Ok(read) => drained += read,
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
@@ -278,7 +278,6 @@ impl StLinkUsb for StLinkUsbDevice {
             let mut write_index = 0;
 
             while remaining_bytes > 0 {
-                refuse_if_pending(self.ep_out.pending(), self.ep_out.endpoint_address())?;
                 let written_bytes = self
                     .ep_out
                     .write_bulk(&write_data[write_index..], timeout)?;
@@ -302,7 +301,6 @@ impl StLinkUsb for StLinkUsbDevice {
             let mut read_index = 0;
 
             while remaining_bytes > 0 {
-                refuse_if_pending(self.ep_in.pending(), self.ep_in.endpoint_address())?;
                 let read_bytes = self
                     .ep_in
                     .read_bulk(&mut read_data[read_index..], timeout)?;
