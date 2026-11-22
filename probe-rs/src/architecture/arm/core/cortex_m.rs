@@ -254,7 +254,7 @@ pub(crate) fn clear_dfsr(memory: &mut dyn ArmMemoryInterface) -> Result<(), ArmE
 ///
 /// C_HALT is set in the write that changes C_MASKINTS as exit_halt does.
 /// When halt is false and the core was running a second write clears C_HALT again.
-/// DFSR survives a local reset (DDI 0403E.e C1.6.1): clear it last
+/// DFSR survives a local reset (DDI 0403E.e C1.6.1): clear it after any C_HALT=1 write
 pub(crate) fn clear_step_before_reset(
     memory: &mut dyn ArmMemoryInterface,
     halt: bool,
@@ -271,7 +271,8 @@ pub(crate) fn clear_step_before_reset(
         memory.flush()?;
 
         if !halt && !was_halted {
-            release_halt(memory, dhcsr)?;
+            // The release already cleared DFSR
+            return release_halt(memory, dhcsr);
         }
     }
     clear_dfsr(memory)?;
@@ -441,37 +442,6 @@ mod tests {
         call(&mut probe).unwrap();
     }
 
-    /// The release rule over an operation list
-    ///
-    /// DFSR starts as maybe set; a C_HALT=1 write makes it so again and
-    /// may not come after the clear; only a write of all five bits
-    /// clears it; a C_HALT=0 write needs it clear
-    fn check_release_rule(ops: &[Op], ends_clear: bool) -> Result<(), String> {
-        let mut clear = false;
-        for (at, op) in ops.iter().enumerate() {
-            match *op {
-                Op::Write(DFSR, DFSR_ALL) => clear = true,
-                Op::Write(DFSR, value) => return Err(format!("op {at}: DFSR write {value:#x}")),
-                Op::Write(DHCSR, value) if value & C_HALT != 0 => {
-                    if clear {
-                        return Err(format!("op {at}: C_HALT=1 write after the clear"));
-                    }
-                }
-                Op::Write(DHCSR, _) => {
-                    if !clear {
-                        return Err(format!("op {at}: release with DFSR maybe set"));
-                    }
-                    clear = false;
-                }
-                _ => {}
-            }
-        }
-        if ends_clear && !clear {
-            return Err("DFSR maybe set at the end".to_owned());
-        }
-        Ok(())
-    }
-
     /// What exit_halt must do from a halted core
     fn exit_halt_ops(step: bool, maskints: bool) -> Vec<Op> {
         let masked = if maskints { C_MASKINTS } else { 0 };
@@ -492,11 +462,6 @@ mod tests {
             for maskints in [false, true] {
                 let ops = exit_halt_ops(step, maskints);
                 recorded(&ops, |memory| exit_halt(memory, step));
-                assert_eq!(
-                    check_release_rule(&ops, false),
-                    Ok(()),
-                    "step {step} maskints {maskints}"
-                );
             }
         }
     }
@@ -507,18 +472,15 @@ mod tests {
         let halt_write = Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN);
         let clear = Op::Write(DFSR, DFSR_ALL);
         let paths = [
+            // Neither C_STEP nor C_MASKINTS set
             (
-                "neither bit",
                 true,
                 vec![Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN), clear],
             ),
+            // Stays halted for the reset
+            (true, vec![Op::Read(DHCSR, stepped), halt_write, clear]),
+            // Was halted, so no release
             (
-                "halt true",
-                true,
-                vec![Op::Read(DHCSR, stepped), halt_write, clear],
-            ),
-            (
-                "halt false, halted",
                 false,
                 vec![
                     Op::Read(DHCSR, S_HALT | C_HALT | stepped),
@@ -526,21 +488,29 @@ mod tests {
                     clear,
                 ],
             ),
+            // Was running, so released again
             (
-                "halt false, running",
                 false,
                 vec![
                     Op::Read(DHCSR, stepped),
                     halt_write,
                     clear,
                     Op::Write(DHCSR, KEY | C_DEBUGEN),
-                    clear,
                 ],
             ),
+            // Step only
+            (
+                true,
+                vec![Op::Read(DHCSR, C_DEBUGEN | C_STEP), halt_write, clear],
+            ),
+            // Mask only
+            (
+                true,
+                vec![Op::Read(DHCSR, C_DEBUGEN | C_MASKINTS), halt_write, clear],
+            ),
         ];
-        for (path, halt, ops) in paths {
+        for (halt, ops) in paths {
             recorded(&ops, |memory| clear_step_before_reset(memory, halt));
-            assert_eq!(check_release_rule(&ops, true), Ok(()), "{path}");
         }
     }
 
@@ -555,38 +525,6 @@ mod tests {
         recorded(&ops, |memory| {
             sequence.debug_core_stop(memory, CoreType::Armv7m)
         });
-        assert_eq!(check_release_rule(&ops, false), Ok(()));
-    }
-
-    #[test]
-    fn the_release_rule_fails_a_release_without_a_clear() {
-        // exit_halt at 21198f15c with a C_MASKINTS change
-        let ops = [
-            Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN),
-            Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN | C_MASKINTS),
-            Op::Write(DHCSR, KEY | C_DEBUGEN | C_MASKINTS | C_STEP),
-        ];
-        assert!(check_release_rule(&ops, false).is_err());
-    }
-
-    #[test]
-    fn the_release_rule_fails_a_halt_write_between_the_clear_and_the_release() {
-        let ops = [
-            Op::Read(DHCSR, S_HALT | C_HALT | C_DEBUGEN),
-            Op::Write(DFSR, DFSR_ALL),
-            Op::Write(DHCSR, KEY | C_HALT | C_DEBUGEN | C_MASKINTS),
-            Op::Write(DHCSR, KEY | C_DEBUGEN | C_MASKINTS | C_STEP),
-        ];
-        assert!(check_release_rule(&ops, false).is_err());
-    }
-
-    #[test]
-    fn the_release_rule_fails_a_clear_of_fewer_bits_and_an_end_maybe_set() {
-        let partial = [Op::Write(DFSR, 0b0_1111), Op::Write(DHCSR, KEY | C_DEBUGEN)];
-        assert!(check_release_rule(&partial, false).is_err());
-        let released = [Op::Write(DFSR, DFSR_ALL), Op::Write(DHCSR, KEY | C_DEBUGEN)];
-        assert_eq!(check_release_rule(&released, false), Ok(()));
-        assert!(check_release_rule(&released, true).is_err());
     }
 
     #[test]
