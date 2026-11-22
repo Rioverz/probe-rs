@@ -1918,6 +1918,7 @@ fn retry_on_wait<R>(mut f: impl FnMut() -> Result<R, StlinkError>) -> Result<R, 
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::time::Instant;
 
     #[derive(Debug)]
     struct MockUsb {
@@ -2103,14 +2104,15 @@ mod test {
 
     #[test]
     fn a_wait_on_every_attempt_retries_the_attempt_count_then_fails() {
-        let mut calls = 0;
-        let start = std::time::Instant::now();
+        let mut calls = Vec::new();
+        let start = Instant::now();
         let result: Result<(), StlinkError> = retry_on_wait(|| {
-            calls += 1;
+            calls.push(Instant::now());
             Err(StlinkError::CommandFailed(Status::SwdDpWait))
         });
+        let returned = Instant::now();
         let elapsed = start.elapsed();
-        assert_eq!(calls, WAIT_RETRY_ATTEMPTS);
+        assert_eq!(calls.len(), WAIT_RETRY_ATTEMPTS as usize);
         // Sleeps only between attempts, each double the one before
         assert!(elapsed >= WAIT_RETRY_FIRST_BACKOFF * ((1 << (WAIT_RETRY_ATTEMPTS - 1)) - 1));
         assert!(elapsed < WAIT_RETRY_FIRST_BACKOFF * ((1 << WAIT_RETRY_ATTEMPTS) - 1));
@@ -2118,6 +2120,13 @@ mod test {
             result,
             Err(StlinkError::CommandFailed(Status::SwdDpWait))
         ));
+        // The first sleep comes before the second call
+        assert!(calls[1] - calls[0] >= WAIT_RETRY_FIRST_BACKOFF);
+        // No sleep after the last call: under half the sleep it would get
+        assert!(
+            returned - calls[calls.len() - 1]
+                < WAIT_RETRY_FIRST_BACKOFF * (1 << (WAIT_RETRY_ATTEMPTS - 2))
+        );
     }
 
     #[test]
