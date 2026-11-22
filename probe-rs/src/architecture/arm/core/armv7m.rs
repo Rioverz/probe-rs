@@ -640,6 +640,9 @@ pub struct Armv7m<'probe> {
     state: &'probe mut CortexMState,
 
     sequence: Arc<dyn ArmDebugSequence>,
+
+    /// FPB revision from the first FP_CTRL read of this handle, read-only in hardware
+    fpb_revision: Option<u32>,
 }
 
 impl<'probe> Armv7m<'probe> {
@@ -682,6 +685,7 @@ impl<'probe> Armv7m<'probe> {
             memory,
             state,
             sequence,
+            fpb_revision: None,
         })
     }
 
@@ -707,17 +711,27 @@ impl<'probe> Armv7m<'probe> {
         Ok(())
     }
 
-    /// Set DEMCR.TRCENA when clear: DWT reads are UNKNOWN and comparators idle without it
-    ///
-    /// It stays set after, a trace user may need it (ARMv7-M ARM C1.6.5)
-    fn enable_dwt(&mut self) -> Result<(), Error> {
-        let mut demcr = Demcr(self.memory.read_word_32(Demcr::get_mmio_address())?);
-        if !demcr.trcena() {
-            demcr.set_trcena(true);
-            self.memory
-                .write_word_32(Demcr::get_mmio_address(), demcr.into())?;
-        }
-        Ok(())
+    /// Read FP_CTRL and keep its revision for this handle
+    fn read_fp_ctrl(&mut self) -> Result<FpCtrl, Error> {
+        let ctrl = FpCtrl::from(self.memory.read_word_32(FpCtrl::get_mmio_address())?);
+        self.fpb_revision = Some(ctrl.rev());
+        Ok(ctrl)
+    }
+}
+
+/// Code comparator count, refused unless FPB version 1 or 2
+fn fpb_units(reg: FpCtrl) -> Result<u32, Error> {
+    if reg.rev() == 0 || reg.rev() == 1 {
+        Ok(reg.num_code())
+    } else {
+        tracing::warn!(
+            "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
+            reg.rev()
+        );
+        Err(Error::Arm(ArmError::Other(format!(
+            "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
+            reg.rev()
+        ))))
     }
 }
 
@@ -1009,46 +1023,30 @@ impl CoreInterface for Armv7m<'_> {
     }
 
     fn available_breakpoint_units(&mut self) -> Result<u32, Error> {
-        let raw_val = self.memory.read_word_32(FpCtrl::get_mmio_address())?;
-
-        let reg = FpCtrl::from(raw_val);
-
-        if reg.rev() == 0 || reg.rev() == 1 {
-            Ok(reg.num_code())
-        } else {
-            tracing::warn!(
-                "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
-                reg.rev()
-            );
-            Err(Error::Arm(ArmError::Other(format!(
-                "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
-                reg.rev()
-            ))))
-        }
+        let ctrl = self.read_fp_ctrl()?;
+        fpb_units(ctrl)
     }
 
     /// See docs on the [`CoreInterface::hw_breakpoints`] trait.
     fn hw_breakpoints(&mut self) -> Result<Vec<Option<u64>>, Error> {
         let mut breakpoints = vec![];
-        let num_hw_breakpoints = self.available_breakpoint_units()? as usize;
-        { 0..num_hw_breakpoints }.try_for_each(|bp_unit_index| {
-            let raw_val = self.memory.read_word_32(FpCtrl::get_mmio_address())?;
-            let ctrl_reg = FpCtrl::from(raw_val);
+        let ctrl_reg = self.read_fp_ctrl()?;
+        let num_hw_breakpoints = fpb_units(ctrl_reg)? as usize;
+        { 0..num_hw_breakpoints }.try_for_each(|bp_unit_index| -> Result<(), Error> {
             // FpRev1 and FpRev2 needs different decoding of the register value, but the location where we read from is the same ...
-            let reg_addr = FpRev1CompX::get_mmio_address() + (bp_unit_index * size_of::<u32>()) as u64;
+            let reg_addr =
+                FpRev1CompX::get_mmio_address() + (bp_unit_index * size_of::<u32>()) as u64;
             // The raw breakpoint address as read from memory.
             let register_value = self.memory.read_word_32(reg_addr)?;
             // The breakpoint address after it has been adjusted for FpRev 1 or 2.
-            let breakpoint:u32;
+            let breakpoint: u32;
             if register_value & 0b1 == 0b1 {
                 // We only care about `enabled` breakpoints.
                 if ctrl_reg.rev() == 0 {
                     breakpoint = FpRev1CompX::get_breakpoint_comparator(register_value)?;
-                } else if ctrl_reg.rev() == 1 {
-                    breakpoint = FpRev2CompX::from(register_value).bpaddr() << 1;
                 } else {
-                    tracing::warn!("This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.", ctrl_reg.rev());
-                    return Err(Error::Other(format!("This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.", ctrl_reg.rev())));
+                    // fpb_units refused other revisions
+                    breakpoint = FpRev2CompX::from(register_value).bpaddr() << 1;
                 }
                 breakpoints.push(Some(breakpoint as u64));
             } else {
@@ -1083,21 +1081,23 @@ impl CoreInterface for Armv7m<'_> {
             )));
         }
 
-        let raw_val = self.memory.read_word_32(FpCtrl::get_mmio_address())?;
-        let ctrl_reg = FpCtrl::from(raw_val);
+        let rev = match self.fpb_revision {
+            Some(rev) => rev,
+            None => self.read_fp_ctrl()?.rev(),
+        };
 
-        let val = if ctrl_reg.rev() == 0 {
+        let val = if rev == 0 {
             FpRev1CompX::breakpoint_configuration(addr)?.into()
-        } else if ctrl_reg.rev() == 1 {
+        } else if rev == 1 {
             FpRev2CompX::breakpoint_configuration(addr).into()
         } else {
             tracing::warn!(
                 "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
-                ctrl_reg.rev()
+                rev
             );
             return Err(Error::Other(format!(
                 "This chip uses FPBU revision {}, which is not yet supported. HW breakpoints are not available.",
-                ctrl_reg.rev()
+                rev
             )));
         };
 
@@ -1123,7 +1123,7 @@ impl CoreInterface for Armv7m<'_> {
     }
 
     fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
-        self.enable_dwt()?;
+        dwt_watchpoint::enable_dwt(&mut *self.memory)?;
         dwt_watchpoint::units(&mut *self.memory)
     }
 
@@ -1139,12 +1139,28 @@ impl CoreInterface for Armv7m<'_> {
         access: WatchpointAccess,
     ) -> Result<(), Error> {
         let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
-        self.enable_dwt()?;
+        dwt_watchpoint::enable_dwt(&mut *self.memory)?;
         dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
     }
 
     fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
         dwt_watchpoint::clear(&mut *self.memory, unit_index)
+    }
+
+    fn set_listed_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        // The listing count has just set TRCENA
+        let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
+        dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
+    }
+
+    fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        let units = self.available_watchpoint_units()?;
+        dwt_watchpoint::clear_all(&mut *self.memory, units)
     }
 
     fn registers(&self) -> &'static CoreRegisters {
@@ -1266,35 +1282,35 @@ fn unsupported_breakpoint_address() {
 mod watchpoint_tests {
     use super::*;
     #[cfg(feature = "builtin-targets")]
-    use crate::{Core, config::Registry};
+    use crate::Core;
+    #[cfg(feature = "builtin-targets")]
+    use crate::architecture::arm::core::dwt_watchpoint::test_support::{
+        TWO_COMPARATORS, builtin_target,
+    };
     use crate::{
-        architecture::arm::core::mock::MockProbe, architecture::arm::sequences::DefaultArmSequence,
+        architecture::arm::core::dwt_watchpoint::test_support::{
+            ADDRESS, DEMCR, DWT_CTRL, comp, expect_set, function,
+        },
+        architecture::arm::core::mock::MockProbe,
+        architecture::arm::sequences::DefaultArmSequence,
         error::WatchpointError,
     };
 
-    // Register addresses from ARMv7-M ARM (DDI 0403E.e) C1.6.5 and C1.8
-    const DEMCR: u64 = 0xE000_EDFC;
+    // DEMCR.TRCENA, ARMv7-M ARM (DDI 0403E.e) C1.6.5
     const TRCENA: u32 = 1 << 24;
-    const DWT_CTRL: u64 = 0xE000_1000;
     const FOUR_COMPARATORS: u32 = 4 << 28;
     #[cfg(feature = "builtin-targets")]
-    const TWO_COMPARATORS: u32 = 2 << 28;
-    const MASK_WORD: u32 = 2;
+    const THREE_COMPARATORS: u32 = 3 << 28;
+    // FPB registers, ARMv7-M ARM C1.11
+    const FP_CTRL: u64 = 0xE000_2000;
     const TRACE_DATA_VALUE: u32 = 0b0011;
     // MATCHED (bit 24) set with FUNCTION[3:0] disabled
     const MATCHED_ONLY: u32 = 1 << 24;
-    const ADDRESS: u32 = 0x2000_0100;
+    #[cfg(feature = "builtin-targets")]
+    const TARGET: &str = "STM32H743VI";
 
-    fn comp(unit: u64) -> u64 {
-        0xE000_1020 + 16 * unit
-    }
-
-    fn mask(unit: u64) -> u64 {
-        comp(unit) + 4
-    }
-
-    fn function(unit: u64) -> u64 {
-        comp(unit) + 8
+    fn fp_comp(unit: u64) -> u64 {
+        0xE000_2008 + 4 * unit
     }
 
     fn armv7m(probe: MockProbe, state: &mut CortexMState) -> Armv7m<'_> {
@@ -1317,13 +1333,6 @@ mod watchpoint_tests {
                 probe.expected_read(comp(unit as u64), comp_value);
             }
         }
-    }
-
-    fn expect_set(probe: &mut MockProbe, unit: u64, address: u32, function_value: u32) {
-        probe.expected_write(function(unit), 0);
-        probe.expected_write(comp(unit), address);
-        probe.expected_write(mask(unit), MASK_WORD);
-        probe.expected_write(function(unit), function_value);
     }
 
     #[test]
@@ -1448,13 +1457,6 @@ mod watchpoint_tests {
     }
 
     #[cfg(feature = "builtin-targets")]
-    fn h743() -> crate::Target {
-        Registry::from_builtin_families()
-            .get_target_by_name("STM32H743VI")
-            .unwrap()
-    }
-
-    #[cfg(feature = "builtin-targets")]
     #[test]
     fn watchpoint_fifth_address_through_core_has_no_free_unit() {
         let mut probe = MockProbe::new(0);
@@ -1466,7 +1468,7 @@ mod watchpoint_tests {
         ];
         expect_units(&mut probe, FOUR_COMPARATORS, &units);
         let mut state = CortexMState::new();
-        let target = h743();
+        let target = builtin_target(TARGET);
         let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
 
         let refused = core
@@ -1483,10 +1485,9 @@ mod watchpoint_tests {
     fn watchpoint_on_a_watched_address_through_core_reuses_its_unit() {
         let mut probe = MockProbe::new(0);
         expect_units(&mut probe, TWO_COMPARATORS, &[(0, 0), (0b0110, ADDRESS)]);
-        expect_trcena_set(&mut probe);
         expect_set(&mut probe, 1, ADDRESS, 0b0111);
         let mut state = CortexMState::new();
-        let target = h743();
+        let target = builtin_target(TARGET);
         let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
 
         core.set_hw_watchpoint(ADDRESS.into(), WatchpointAccess::ReadWrite)
@@ -1495,20 +1496,109 @@ mod watchpoint_tests {
 
     #[cfg(feature = "builtin-targets")]
     #[test]
-    fn watchpoint_clear_all_through_core_clears_a_trace_unit_too() {
+    fn watchpoint_set_through_core_with_trcena_clear_enables_the_dwt_in_the_listing_only() {
         let mut probe = MockProbe::new(0);
-        let trace = (TRACE_DATA_VALUE, 0x2000_0000);
-        let watch = (0b0101, 0x2000_0004);
-        // The list, then per address the list again and its FUNCTION 0
-        expect_units(&mut probe, TWO_COMPARATORS, &[trace, watch]);
-        expect_units(&mut probe, TWO_COMPARATORS, &[trace, watch]);
-        probe.expected_write(function(0), 0);
-        expect_units(&mut probe, TWO_COMPARATORS, &[(0, 0), watch]);
-        probe.expected_write(function(1), 0);
+        probe.expected_read(DEMCR, 0);
+        probe.expected_write(DEMCR, TRCENA);
+        probe.expected_read(DWT_CTRL, TWO_COMPARATORS);
+        probe.expected_read(function(0), 0);
+        probe.expected_read(function(1), 0);
+        expect_set(&mut probe, 0, ADDRESS, 0b0110);
         let mut state = CortexMState::new();
-        let target = h743();
+        let target = builtin_target(TARGET);
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        core.set_hw_watchpoint(ADDRESS.into(), WatchpointAccess::Write)
+            .unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_clear_all_through_core_disables_every_unit_unread() {
+        let mut probe = MockProbe::new(0);
+        expect_trcena_set(&mut probe);
+        probe.expected_read(DWT_CTRL, THREE_COMPARATORS);
+        // No listing: FUNCTION 0 to every unit, flush not checked by the mock
+        for unit in 0..3 {
+            probe.expected_write(function(unit), 0);
+        }
+        let mut state = CortexMState::new();
+        let target = builtin_target(TARGET);
         let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
 
         core.clear_all_hw_watchpoints().unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn core_forwards_the_listed_set_and_the_clear_all() {
+        let mut probe = MockProbe::new(0);
+        expect_set(&mut probe, 1, ADDRESS, 0b0110);
+        expect_trcena_set(&mut probe);
+        probe.expected_read(DWT_CTRL, TWO_COMPARATORS);
+        probe.expected_write(function(0), 0);
+        probe.expected_write(function(1), 0);
+        let mut state = CortexMState::new();
+        let target = builtin_target(TARGET);
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        CoreInterface::set_listed_hw_watchpoint(
+            &mut core,
+            1,
+            ADDRESS.into(),
+            WatchpointAccess::Write,
+        )
+        .unwrap();
+        CoreInterface::clear_all_hw_watchpoints(&mut core).unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn breakpoint_clear_all_through_core_lists_once() {
+        let mut probe = MockProbe::new(0);
+        // Revision 0 (FPB version 1), three code comparators, unit 1 free
+        probe.expected_read(FP_CTRL, 0x0000_0030);
+        probe.expected_read(fp_comp(0), 0x4800_09A5);
+        probe.expected_read(fp_comp(1), 0);
+        probe.expected_read(fp_comp(2), 0x4800_1001);
+        probe.expected_write(fp_comp(0), 0);
+        probe.expected_write(fp_comp(2), 0);
+        let mut state = CortexMState::new();
+        let target = builtin_target(TARGET);
+        let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+        core.clear_all_hw_breakpoints().unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn breakpoint_set_through_core_reuses_the_unit_with_one_fp_ctrl_read() {
+        // Two code comparators; FP_COMP1 holds 0x0800_09A4 for that revision
+        for (fp_ctrl, comp_value) in [(0x1000_0020, 0x0800_09A5), (0x0000_0020, 0x4800_09A5)] {
+            let mut probe = MockProbe::new(0);
+            // KEY and ENABLE: the handle state says the FPB is off
+            probe.expected_write(FP_CTRL, 0b11);
+            probe.expected_read(FP_CTRL, fp_ctrl);
+            probe.expected_read(fp_comp(0), 0);
+            probe.expected_read(fp_comp(1), comp_value);
+            probe.expected_write(fp_comp(1), comp_value);
+            let mut state = CortexMState::new();
+            let target = builtin_target(TARGET);
+            let mut core = Core::new(0, "main", &target, armv7m(probe, &mut state));
+
+            core.set_hw_breakpoint(0x0800_09A4).unwrap();
+        }
+    }
+
+    #[test]
+    fn breakpoint_set_on_a_fresh_handle_reads_fp_ctrl_for_the_revision() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(FP_CTRL, 0x1000_0020);
+        probe.expected_write(fp_comp(0), 0x0800_09A5);
+        let mut state = CortexMState::new();
+
+        armv7m(probe, &mut state)
+            .set_hw_breakpoint(0, 0x0800_09A4)
+            .unwrap();
     }
 }

@@ -1,8 +1,9 @@
 //! DWT data watchpoints shared by the Armv6-M and Armv7-M cores
 
+use super::armv7m::Demcr;
 use crate::{
     architecture::arm::memory::ArmMemoryInterface,
-    core::WatchpointAccess,
+    core::{MemoryMappedRegister, WatchpointAccess},
     error::{Error, WatchpointError},
 };
 
@@ -43,12 +44,26 @@ pub(super) fn dwt_comparator(unit: usize) -> u64 {
     DWT_COMP0 + DWT_COMPARATOR_STRIDE * unit as u64
 }
 
+/// Set DEMCR.TRCENA when clear, the bit Armv6-M calls DWTENA: comparators idle without it
+///
+/// It stays set until detach writes DEMCR 0, a trace user may need it (ARMv7-M ARM C1.6.5)
+pub(super) fn enable_dwt(memory: &mut dyn ArmMemoryInterface) -> Result<(), Error> {
+    let mut demcr = Demcr(memory.read_word_32(Demcr::get_mmio_address())?);
+    if !demcr.trcena() {
+        demcr.set_trcena(true);
+        memory.write_word_32(Demcr::get_mmio_address(), demcr.into())?;
+    }
+    Ok(())
+}
+
 /// NUMCOMP, the number of comparators, from DWT_CTRL
 pub(super) fn units(memory: &mut dyn ArmMemoryInterface) -> Result<u32, Error> {
     Ok(memory.read_word_32(DWT_CTRL)? >> 28)
 }
 
 /// Watched address per comparator, `None` when FUNCTION is disabled
+///
+/// On Armv7-M each FUNCTION read clears MATCHED, so read MATCHED before any listing (DDI 0403E.e C1.8.17)
 pub(super) fn in_use(
     memory: &mut dyn ArmMemoryInterface,
     units: u32,
@@ -91,4 +106,57 @@ pub(super) fn clear(memory: &mut dyn ArmMemoryInterface, unit: usize) -> Result<
     )?;
     memory.flush()?;
     Ok(())
+}
+
+/// Disable each of the `units` comparators (FUNCTION 0) unread, then flush once
+pub(super) fn clear_all(memory: &mut dyn ArmMemoryInterface, units: u32) -> Result<(), Error> {
+    for unit in 0..units as usize {
+        memory.write_word_32(
+            dwt_comparator(unit) + DWT_FUNCTION_OFFSET,
+            DWT_FUNCTION_DISABLED,
+        )?;
+    }
+    memory.flush()?;
+    Ok(())
+}
+
+/// Armv6-M and Armv7-M test fixtures, addresses as literals
+#[cfg(test)]
+pub(super) mod test_support {
+    use crate::architecture::arm::core::mock::MockProbe;
+
+    // ARMv6-M ARM (DDI 0419E) and ARMv7-M ARM (DDI 0403E.e) C1.6.5 and C1.8
+    pub(crate) const DEMCR: u64 = 0xE000_EDFC;
+    pub(crate) const DWT_CTRL: u64 = 0xE000_1000;
+    #[cfg(feature = "builtin-targets")]
+    pub(crate) const TWO_COMPARATORS: u32 = 2 << 28;
+    pub(crate) const ADDRESS: u32 = 0x2000_0100;
+    const MASK_WORD: u32 = 2;
+
+    pub(crate) fn comp(unit: u64) -> u64 {
+        0xE000_1020 + 16 * unit
+    }
+
+    fn mask(unit: u64) -> u64 {
+        comp(unit) + 4
+    }
+
+    pub(crate) fn function(unit: u64) -> u64 {
+        comp(unit) + 8
+    }
+
+    // FUNCTION 0, COMP, MASK, then the access code
+    pub(crate) fn expect_set(probe: &mut MockProbe, unit: u64, address: u32, function_value: u32) {
+        probe.expected_write(function(unit), 0);
+        probe.expected_write(comp(unit), address);
+        probe.expected_write(mask(unit), MASK_WORD);
+        probe.expected_write(function(unit), function_value);
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    pub(crate) fn builtin_target(name: &str) -> crate::Target {
+        crate::config::Registry::from_builtin_families()
+            .get_target_by_name(name)
+            .unwrap()
+    }
 }

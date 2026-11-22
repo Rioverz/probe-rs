@@ -863,6 +863,7 @@ impl CoreInterface for Armv6m<'_> {
     }
 
     fn available_watchpoint_units(&mut self) -> Result<u32, Error> {
+        dwt_watchpoint::enable_dwt(&mut *self.memory)?;
         dwt_watchpoint::units(&mut *self.memory)
     }
 
@@ -878,21 +879,28 @@ impl CoreInterface for Armv6m<'_> {
         access: WatchpointAccess,
     ) -> Result<(), Error> {
         let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
-
-        // The comparators act only while the DWT is enabled. It stays enabled after the
-        // watchpoint is cleared: a trace user may need it, and a disabled comparator does nothing.
-        let mut demcr = Demcr(self.memory.read_word_32(Demcr::get_mmio_address())?);
-        if !demcr.dwtena() {
-            demcr.set_dwtena(true);
-            self.memory
-                .write_word_32(Demcr::get_mmio_address(), demcr.into())?;
-        }
-
+        dwt_watchpoint::enable_dwt(&mut *self.memory)?;
         dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
     }
 
     fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
         dwt_watchpoint::clear(&mut *self.memory, unit_index)
+    }
+
+    fn set_listed_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        // The listing count has just set DWTENA
+        let registers = watchpoint_registers(valid_32bit_address(addr)?, access)?;
+        dwt_watchpoint::write(&mut *self.memory, unit_index, registers)
+    }
+
+    fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        let units = self.available_watchpoint_units()?;
+        dwt_watchpoint::clear_all(&mut *self.memory, units)
     }
 
     fn registers(&self) -> &'static CoreRegisters {
@@ -989,6 +997,87 @@ impl CoreMemoryInterface for Armv6m<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "builtin-targets")]
+    use crate::Core;
+    #[cfg(feature = "builtin-targets")]
+    use crate::architecture::arm::core::dwt_watchpoint::test_support::{
+        DWT_CTRL, TWO_COMPARATORS, builtin_target, function,
+    };
+    use crate::architecture::arm::{
+        core::dwt_watchpoint::test_support::{ADDRESS, DEMCR, expect_set},
+        core::mock::MockProbe,
+        sequences::DefaultArmSequence,
+    };
+
+    // DEMCR.DWTENA, ARMv6-M ARM (DDI 0419E) C1.6.5
+    const DWTENA: u32 = 1 << 24;
+    #[cfg(feature = "builtin-targets")]
+    const TARGET: &str = "STM32F072RB";
+
+    fn armv6m(probe: MockProbe, state: &mut CortexMState) -> Armv6m<'_> {
+        state.initialize();
+        Armv6m::new(Box::new(probe), state, DefaultArmSequence::create()).unwrap()
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_set_through_core_reads_demcr_once() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(DEMCR, DWTENA);
+        probe.expected_read(DWT_CTRL, TWO_COMPARATORS);
+        probe.expected_read(function(0), 0);
+        probe.expected_read(function(1), 0);
+        expect_set(&mut probe, 0, ADDRESS, 0b0110);
+        let mut state = CortexMState::new();
+        let target = builtin_target(TARGET);
+        let mut core = Core::new(0, "main", &target, armv6m(probe, &mut state));
+
+        core.set_hw_watchpoint(ADDRESS.into(), WatchpointAccess::Write)
+            .unwrap();
+    }
+
+    #[cfg(feature = "builtin-targets")]
+    #[test]
+    fn watchpoint_clear_all_through_core_sets_dwtena_and_disables_every_unit() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(DEMCR, 0);
+        probe.expected_write(DEMCR, DWTENA);
+        probe.expected_read(DWT_CTRL, TWO_COMPARATORS);
+        probe.expected_write(function(0), 0);
+        probe.expected_write(function(1), 0);
+        let mut state = CortexMState::new();
+        let target = builtin_target(TARGET);
+        let mut core = Core::new(0, "main", &target, armv6m(probe, &mut state));
+
+        core.clear_all_hw_watchpoints().unwrap();
+    }
+
+    #[test]
+    fn watchpoint_set_with_dwtena_clear_enables_the_dwt_first() {
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(DEMCR, 0);
+        probe.expected_write(DEMCR, DWTENA);
+        expect_set(&mut probe, 0, ADDRESS, 0b0110);
+        let mut state = CortexMState::new();
+
+        armv6m(probe, &mut state)
+            .set_hw_watchpoint(0, ADDRESS.into(), WatchpointAccess::Write)
+            .unwrap();
+    }
+
+    #[test]
+    fn watchpoint_unaligned_is_refused_before_any_register_access() {
+        let probe = MockProbe::new(0);
+        let mut state = CortexMState::new();
+
+        let refused = armv6m(probe, &mut state)
+            .set_hw_watchpoint(0, 0x2000_0102, WatchpointAccess::Write)
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            Error::WatchpointOperation(WatchpointError::NotWordAligned(0x2000_0102))
+        ));
+    }
 
     #[test]
     fn a_watchpoint_watches_one_aligned_word_for_its_access() {
