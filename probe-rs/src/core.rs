@@ -129,6 +129,27 @@ pub trait CoreInterface: MemoryInterface {
         Err(Error::NotImplemented("hardware watchpoints"))
     }
 
+    /// Sets a watchpoint on `addr` for `access` in unit `unit_index`, which the caller has just
+    /// listed with [`CoreInterface::hw_watchpoints`] on this handle
+    fn set_listed_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        self.set_hw_watchpoint(unit_index, addr, access)
+    }
+
+    /// Disables every hardware watchpoint unit, whoever set it
+    fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        for (unit_index, watchpoint) in self.hw_watchpoints()?.into_iter().enumerate() {
+            if watchpoint.is_some() {
+                self.clear_hw_watchpoint(unit_index)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Returns a list of all the registers of this core.
     fn registers(&self) -> &'static CoreRegisters;
 
@@ -526,8 +547,10 @@ impl<'probe> Core<'probe> {
     /// Also used as a helper function in [`Session::drop`](crate::session::Session).
     #[tracing::instrument(skip(self))]
     pub fn clear_all_hw_breakpoints(&mut self) -> Result<(), Error> {
-        for breakpoint in (self.inner.hw_breakpoints()?).into_iter().flatten() {
-            self.clear_hw_breakpoint(breakpoint)?
+        for (unit_index, breakpoint) in self.inner.hw_breakpoints()?.into_iter().enumerate() {
+            if breakpoint.is_some() {
+                self.inner.clear_hw_breakpoint(unit_index)?;
+            }
         }
         Ok(())
     }
@@ -555,7 +578,8 @@ impl<'probe> Core<'probe> {
                 .position(|wp| wp.is_none())
                 .ok_or(WatchpointError::NoFreeUnit)?,
         };
-        self.inner.set_hw_watchpoint(unit_index, address, access)
+        self.inner
+            .set_listed_hw_watchpoint(unit_index, address, access)
     }
 
     /// Clear a hardware watchpoint
@@ -578,10 +602,7 @@ impl<'probe> Core<'probe> {
     /// Also used as a helper function in [`Session::drop`](crate::session::Session).
     #[tracing::instrument(skip(self))]
     pub fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
-        for watchpoint in (self.inner.hw_watchpoints()?).into_iter().flatten() {
-            self.clear_hw_watchpoint(watchpoint)?
-        }
-        Ok(())
+        self.inner.clear_all_hw_watchpoints()
     }
 
     /// Returns the architecture of the core.
@@ -728,6 +749,20 @@ impl CoreInterface for Core<'_> {
 
     fn clear_hw_watchpoint(&mut self, unit_index: usize) -> Result<(), Error> {
         self.inner.clear_hw_watchpoint(unit_index)
+    }
+
+    fn set_listed_hw_watchpoint(
+        &mut self,
+        unit_index: usize,
+        addr: u64,
+        access: WatchpointAccess,
+    ) -> Result<(), Error> {
+        self.inner
+            .set_listed_hw_watchpoint(unit_index, addr, access)
+    }
+
+    fn clear_all_hw_watchpoints(&mut self) -> Result<(), Error> {
+        self.inner.clear_all_hw_watchpoints()
     }
 
     fn registers(&self) -> &'static CoreRegisters {
