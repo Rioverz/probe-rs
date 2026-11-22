@@ -1601,4 +1601,29 @@ mod watchpoint_tests {
             .set_hw_breakpoint(0, 0x0800_09A4)
             .unwrap();
     }
+
+    #[test]
+    fn breakpoint_units_are_the_code_count_of_one_fp_ctrl_read() {
+        // Six code comparators (bits 7:4), FPB revision 0 then 1 (bits 31:28)
+        for fp_ctrl in [0x0000_0060, 0x1000_0060] {
+            let mut probe = MockProbe::new(0);
+            probe.expected_read(FP_CTRL, fp_ctrl);
+            let mut state = CortexMState::new();
+            assert_eq!(
+                armv7m(probe, &mut state)
+                    .available_breakpoint_units()
+                    .unwrap(),
+                6
+            );
+        }
+        // Revision 2 is refused
+        let mut probe = MockProbe::new(0);
+        probe.expected_read(FP_CTRL, 0x2000_0060);
+        let mut state = CortexMState::new();
+        assert!(
+            armv7m(probe, &mut state)
+                .available_breakpoint_units()
+                .is_err()
+        );
+    }
 }
