@@ -3252,12 +3252,7 @@ dependencies = [
 name = "probe-rs-gdb"
 version = "0.32.0"
 dependencies = [
- "anyhow",
- "gdbstub",
- "itertools 0.15.0",
- "parking_lot 0.12.5",
  "probe-rs",
- "tracing",
 ]
 
 [[package]]
