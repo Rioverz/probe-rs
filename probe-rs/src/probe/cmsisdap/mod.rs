@@ -1612,6 +1612,66 @@ mod tests {
         assert!(capabilities.unwrap().swd_implemented);
     }
 
+    // AC-2 (Dwight): replies an earlier session left in the probe are drained
+    // when it opens, so they are not read as the answers to the open.
+    #[test]
+    fn stale_replies_from_an_earlier_session_are_drained_when_the_probe_opens() {
+        let probe = FakeProbe::shared(64, |command| standard_reply(command, 64, 4));
+        for stale in [
+            &[0x00, 0xFE][..],
+            &[0x00, 0xF0],
+            &[0x01, 0x00, 0x00],
+            &[0x05, 0x00],
+        ] {
+            probe.lock().unwrap().write(stale);
+        }
+        let mut dap = CmsisDap::new_from_device(CmsisDapDevice::Fake(probe.clone())).unwrap();
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert!(dap.capabilities.swd_implemented);
+        assert!(probe.lock().unwrap().owes_nothing());
+        let capabilities = commands::send_command(&mut dap.device, &CapabilitiesCommand {});
+        assert!(capabilities.unwrap().swd_implemented);
+    }
+
+    // AC-2 (Dwight): a stale packet size reply from an earlier session, well
+    // formed but with another size, is not taken as this probe's size.
+    #[test]
+    fn a_stale_packet_size_reply_is_not_taken_as_the_packet_size() {
+        let mut first = true;
+        let probe = FakeProbe::shared(64, move |command| match command {
+            [0x00, 0xFF, ..] if std::mem::replace(&mut first, false) => {
+                Reply::Now(vec![0x00, 0x02, 0x00, 0x02])
+            }
+            _ => standard_reply(command, 64, 4),
+        });
+        probe.lock().unwrap().write(&[0x00, 0xFF]);
+        let dap = CmsisDap::new_from_device(CmsisDapDevice::Fake(probe.clone())).unwrap();
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert!(probe.lock().unwrap().owes_nothing());
+    }
+
+    // AC-2 (Dwight): a transfer reply an earlier session still owed arrives
+    // after the open's first drain. The open asks again until its answers are
+    // its own, and the stream is in step after it.
+    #[test]
+    fn a_late_stale_transfer_reply_at_open_is_cleared_and_the_open_succeeds() {
+        let mut late = Some(vec![0x05, 0x01, 0x01]);
+        let probe = FakeProbe::shared(64, move |command| match late.take() {
+            Some(reply) => Reply::Held(reply),
+            None => standard_reply(command, 64, 4),
+        });
+        probe.lock().unwrap().write(&[0x05, 0x00, 0x01, 0x02]);
+        let mut dap = CmsisDap::new_from_device(CmsisDapDevice::Fake(probe.clone())).unwrap();
+        assert_eq!(dap.packet_size, 64);
+        assert_eq!(dap.packet_count, 4);
+        assert!(dap.capabilities.swd_implemented);
+        assert!(probe.lock().unwrap().owes_nothing());
+        let capabilities = commands::send_command(&mut dap.device, &CapabilitiesCommand {});
+        assert!(capabilities.unwrap().swd_implemented);
+    }
+
     #[test]
     fn a_retried_packet_size_keeps_the_usb_timeout() {
         let mut answered = false;
