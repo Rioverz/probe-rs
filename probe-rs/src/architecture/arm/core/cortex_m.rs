@@ -517,6 +517,16 @@ mod tests {
                     Op::Write(DHCSR, KEY | C_DEBUGEN),
                 ],
             ),
+            // Step only
+            (
+                true,
+                vec![Op::Read(DHCSR, C_DEBUGEN | C_STEP), halt_write, clear],
+            ),
+            // Mask only
+            (
+                true,
+                vec![Op::Read(DHCSR, C_DEBUGEN | C_MASKINTS), halt_write, clear],
+            ),
         ];
         for (halt, ops) in paths {
             recorded(&ops, |memory| clear_step_before_reset(memory, halt));
